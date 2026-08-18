@@ -290,9 +290,11 @@ ON processed_batches(server_updated_at, device_id, batch_id);
 
 ### 5.8 实现前 D1 实验
 
-> 状态：尚未验证，属于正式实现前的阻塞实验。
+> 状态：已于 2026-08-18 在本地 Miniflare D1 与远端测试 D1 验证通过。
 
 先编写最小实验 migration 和测试 Worker，仅验证：`changes()` 断言、`last_insert_rowid()`、CHECK/UNIQUE 导致的整批回滚、相同 batch 并发、最多 8 个 operations 的语句数与远端 D1 行为。实验通过后才能把该 SQL 模式用于正式业务表；若任一行为与预期不符，必须先修改事务设计和本文档。
+
+验证结果：跨语句 `changes()` 断言和 `last_insert_rowid()` 均符合预期；CHECK/UNIQUE 失败会回滚整批；相同 batch 并发得到一次 applied 和一次 replayed，且只产生一份实体、change 和批次记录；8 个 operations 的 34 条语句可在同一 batch 中原子提交。
 
 ## 6. HTTP API
 
