@@ -1,5 +1,7 @@
 node_modules/
 .wrangler/
+dist/
+.DS_Store
 experiments/**/.wrangler/
 .dev.vars
 *.log
