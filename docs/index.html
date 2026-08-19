@@ -3,187 +3,59 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="dark">
-    <meta name="theme-color" content="#071225">
-    <meta name="description" content="一个主密钥即可部署的 Cloudflare Worker + D1 离线同步服务。">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#f6f7f9">
+    <meta name="description" content="部署 Cloudflare Worker + D1 离线同步服务，并在浏览器本地生成主密钥。">
     <meta name="repository-url" content="__REPOSITORY_URL__">
-    <meta property="og:title" content="D1 Sync — 离线优先的原子云同步">
-    <meta property="og:description" content="一个主密钥、多个设备、原子批次、冲突检测和完整同步。">
+    <meta property="og:title" content="D1 Sync">
+    <meta property="og:description" content="一个主密钥即可部署的离线优先云同步服务。">
     <meta property="og:type" content="website">
-    <meta property="og:image" content="__PAGES_URL__/og.png">
-    <meta name="twitter:card" content="summary_large_image">
-    <title>D1 Sync — 离线优先的原子云同步</title>
+    <title>D1 Sync</title>
     <link rel="stylesheet" href="style.css">
     <script src="app.js" defer></script>
   </head>
   <body>
-    <header class="site-header">
-      <a class="brand" href="#top" aria-label="D1 Sync 首页"><span class="brand-mark">D1</span> Sync</a>
-      <nav aria-label="主导航">
-        <a href="#architecture">工作原理</a>
-        <a href="#deploy">部署</a>
-        <a href="#key">生成密钥</a>
-      </nav>
-      <a class="header-link" data-repository-link href="#">GitHub <span aria-hidden="true">↗</span></a>
+    <header class="topbar">
+      <h1>D1 Sync</h1>
+      <a class="github-button" data-repository-link href="__REPOSITORY_URL__">GitHub ↗</a>
     </header>
 
-    <main id="top">
-      <section class="hero" aria-labelledby="hero-title">
-        <div class="hero-copy">
-          <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> Cloudflare Worker + D1</p>
-          <h1 id="hero-title">让多设备数据同步，<br><span>保持简单而可靠。</span></h1>
-          <p class="hero-lede">一个主密钥，一套版本化 API。离线写入、原子批次、冲突检测、墓碑删除和完整同步都由边缘 Worker 处理。</p>
-          <div class="hero-actions">
-            <a class="button primary" href="#key">生成主密钥 <span aria-hidden="true">→</span></a>
-            <a class="button secondary" href="#deploy">查看部署步骤</a>
-          </div>
-          <ul class="feature-row" aria-label="核心能力">
-            <li>原子批次</li>
-            <li>离线优先</li>
-            <li>自托管</li>
-          </ul>
-        </div>
-
-        <div class="sync-visual" aria-label="两台设备通过 D1 数据库同步的示意图">
-          <div class="orbit orbit-one" aria-hidden="true"></div>
-          <div class="orbit orbit-two" aria-hidden="true"></div>
-          <div class="device device-left">
-            <span class="device-speaker"></span>
-            <span class="device-line wide"></span>
-            <span class="device-line"></span>
-            <span class="device-check">✓</span>
-          </div>
-          <div class="database">
-            <span class="db-top"></span>
-            <span class="db-band band-one"></span>
-            <span class="db-band band-two"></span>
-            <span class="db-lights"><i></i><i></i><i></i></span>
-            <strong>D1</strong>
-          </div>
-          <div class="device device-right">
-            <span class="device-speaker"></span>
-            <span class="device-line wide"></span>
-            <span class="device-line"></span>
-            <span class="device-check">✓</span>
-          </div>
-          <div class="connector connector-left" aria-hidden="true"></div>
-          <div class="connector connector-right" aria-hidden="true"></div>
-          <span class="sync-label">change_seq</span>
-        </div>
-      </section>
-
-      <section class="metrics" aria-label="Cloudflare D1 免费版用量">
-        <div><strong>5M</strong><span>每日读取行数</span></div>
-        <div><strong>100K</strong><span>每日写入行数</span></div>
-        <div><strong>500 MB</strong><span>单数据库容量</span></div>
-        <p>Cloudflare D1 免费计划当前还包含 5 GB 账户总存储；限额会变化，请以 <a href="https://developers.cloudflare.com/d1/platform/pricing/">官方定价</a>和<a href="https://developers.cloudflare.com/d1/platform/limits/">平台限制</a>为准。</p>
-      </section>
-
-      <section id="architecture" class="section architecture">
-        <div class="section-heading">
-          <p class="eyebrow">工作原理</p>
-          <h2>服务端时间不决定冲突，版本号才决定。</h2>
-          <p>客户端保留本地数据库和待提交操作；Worker 用实体版本处理并发，用全局流水做增量拉取。</p>
-        </div>
-        <div class="principle-grid">
-          <article>
-            <span class="number">01</span>
-            <h3>本地先写</h3>
-            <p>用户操作先在客户端事务中写入本地镜像与 pending ops，网络断开也不丢失意图。</p>
-          </article>
-          <article>
-            <span class="number">02</span>
-            <h3>原子提交</h3>
-            <p>最多 8 个 operation 与 change 流水、幂等记录在同一个 D1 batch 中全成或全败。</p>
-          </article>
-          <article>
-            <span class="number">03</span>
-            <h3>安全追平</h3>
-            <p>增量游标过期时，完整同步固定截止水位，在暂存区追平后一次性切换。</p>
-          </article>
-        </div>
-      </section>
-
-      <section id="deploy" class="section deploy-section">
-        <div class="section-heading">
-          <p class="eyebrow">部署指南</p>
-          <h2>从空账户到第一个同步请求。</h2>
-          <p>部署流程自动预配 D1、应用迁移并绑定 Worker。你只需要保管一个主密钥。</p>
-        </div>
+    <main id="top" class="cards">
+      <section class="card intro-card" aria-labelledby="intro-title">
+        <h2 id="intro-title"><span>1</span> 您需要先了解</h2>
+        <p>本项目用 Cloudflare Worker 和 D1 在多台设备间同步数据库。</p>
+        <p class="quota"><strong>用量限制：</strong>D1 免费版每日读取 500 万行、写入 10 万行；单库 500 MB、账户共 5 GB。实际额度以 <a href="https://developers.cloudflare.com/d1/platform/pricing/">Cloudflare 官方说明</a>为准。</p>
+        <br>
+        <p><strong>操作步骤：</strong></p>
         <ol class="steps">
-          <li>
-            <span>1</span>
-            <div><h3>生成并保存主密钥</h3><p>在下方浏览器本地生成 256-bit 密钥，立即存入密码管理器。</p></div>
-          </li>
-          <li>
-            <span>2</span>
-            <div><h3>启动 Cloudflare 部署</h3><p>部署页会克隆仓库、自动创建 D1，并要求把主密钥填写为 Worker Secret。</p></div>
-          </li>
-          <li>
-            <span>3</span>
-            <div><h3>检查健康端点</h3><p>部署完成后访问 <code>GET /v1/health</code>，确认返回 API 版本 1。</p></div>
-          </li>
-          <li>
-            <span>4</span>
-            <div><h3>绑定第一台设备</h3><p>调用 <code>POST /v1/devices/bind</code>，随后带上 <code>X-Device-ID</code> 开始同步。</p></div>
-          </li>
+          <li><strong>生成密钥：</strong>在下方生成主密钥 <strong>MASTER_KEY</strong> 并复制。</li>
+          <li><strong>开始部署：</strong>点击 Deploy to Cloudflare，进入 Cloudflare Worker 创建页面。</li>
+          <li><strong>填写信息：</strong>您需要把主密钥填入部署表单的 <strong>MASTER_KEY</strong> 选项；至于其他选项，您可以自行决定。</li>
+          <li><strong>部署之后：</strong>您需要保存主密钥和 Cloudflare worker 网址。</li>
         </ol>
       </section>
 
-      <section id="key" class="section key-section" aria-labelledby="key-title">
-        <div class="key-copy">
-          <p class="eyebrow">主密钥</p>
-          <h2 id="key-title">只在此刻、此浏览器内存在。</h2>
-          <p>密钥由浏览器 Web Crypto 生成，不会上传、持久化或写入 URL。刷新或离开页面后，本页无法恢复它。</p>
-          <ul class="security-list">
-            <li><span>✓</span> 32 个随机字节，64 位小写十六进制</li>
-            <li><span>✓</span> 不写入 localStorage、Cookie 或 IndexedDB</li>
-            <li><span>✓</span> 泄露时替换 Secret，全部设备重新配置</li>
-          </ul>
+      <section class="card key-card" aria-labelledby="key-title">
+        <h2 id="key-title"><span>2</span> 生成主密钥</h2>
+        <textarea id="master-key" rows="2" readonly spellcheck="false" autocomplete="off" placeholder="点击生成按钮"></textarea>
+        <div class="key-actions">
+          <button id="generate-key" class="button primary" type="button">生成</button>
+          <button id="copy-key" class="button" type="button" disabled>复制</button>
         </div>
-        <div class="key-card">
-          <div class="key-card-header">
-            <span>MASTER_KEY</span>
-            <span class="local-badge">仅本地</span>
-          </div>
-          <label class="sr-only" for="master-key">生成的主密钥</label>
-          <textarea id="master-key" rows="3" readonly spellcheck="false" autocomplete="off" placeholder="点击生成一个新的主密钥"></textarea>
-          <p id="key-status" class="key-status" aria-live="polite">尚未生成</p>
-          <div class="key-actions">
-            <button id="generate-key" class="button primary" type="button">生成新密钥</button>
-            <button id="copy-key" class="button secondary" type="button" disabled>复制</button>
-          </div>
-          <a id="deploy-button" class="deploy-button is-disabled" href="#" aria-disabled="true">
-            <span><small>准备好后</small>Deploy to Cloudflare</span><b aria-hidden="true">↗</b>
-          </a>
-          <p class="key-warning">先复制并保存密钥，再进入部署。Cloudflare 控制面板保存 Secret 后也不能显示原值。</p>
-        </div>
+        <p id="key-status" class="status" aria-live="polite">尚未生成</p>
+        <ul class="rules">
+          <li>密钥只在本浏览器内生成，不上传、不存储；刷新或离开页面后立即丢失。</li>
+          <li>请保存到密码管理器；客户端应使用系统安全凭据存储，页面和 Cloudflare 都无法恢复原值。</li>
+          <li>密钥丢失或设备疑似泄露时，请重新生成主密钥替换 Worker 的 Secret，并重新配置全部设备。</li>
+        </ul>
       </section>
 
-      <section class="section api-section">
-        <div>
-          <p class="eyebrow">API 入口</p>
-          <h2>小而明确的 v1 协议。</h2>
-          <p>统一 JSON 包装、静态表白名单、请求大小限制和稳定错误码。完整请求与响应示例见 <a data-api-link href="API.md">API 文档</a>。</p>
-        </div>
-        <pre><code><span>POST</span> /v1/sync
-Authorization: Bearer &lt;MASTER_KEY&gt;
-X-API-Version: 1
-X-Device-ID: device-01
-
-{
-  "cursor": 128,
-  "ack_cursor": 128,
-  "limit": 200,
-  "operations": []
-}</code></pre>
+      <section class="card deploy-card" aria-labelledby="deploy-title">
+        <h2 id="deploy-title"><span>3</span> 部署</h2>
+        <p>先生成、复制并安全保存密钥，然后启动部署。</p>
+        <a id="deploy-button" class="deploy-button is-disabled" href="#" aria-disabled="true" target="_blank">Deploy to Cloudflare ↗</a>
+        <p class="fine-print">注意：主密钥不包含在该链接内，必须在部署表单中手动填入。</p>
       </section>
     </main>
-
-    <footer>
-      <a class="brand" href="#top"><span class="brand-mark">D1</span> Sync</a>
-      <p>Offline-first. Atomic. Self-hosted.</p>
-      <a data-repository-link href="#">查看源代码 <span aria-hidden="true">↗</span></a>
-    </footer>
   </body>
 </html>

@@ -29,7 +29,8 @@
       link.target = "_blank";
       link.rel = "noreferrer";
     } else {
-      link.hidden = true;
+      link.removeAttribute("href");
+      link.setAttribute("aria-disabled", "true");
     }
   });
 
@@ -51,11 +52,13 @@
     keyField.value = masterKey;
     status.textContent = "已生成 256-bit 主密钥；请立即复制并保存。";
     copyButton.disabled = false;
-    deployButton.classList.remove("is-disabled");
-    deployButton.setAttribute("aria-disabled", "false");
-    deployButton.href = repository
-      ? `https://deploy.workers.cloudflare.com/?url=${encodeURIComponent(repository)}`
-      : "https://deploy.workers.cloudflare.com/";
+    if (repository) {
+      deployButton.classList.remove("is-disabled");
+      deployButton.setAttribute("aria-disabled", "false");
+      deployButton.href = `https://deploy.workers.cloudflare.com/?url=${encodeURIComponent(repository)}`;
+    } else {
+      status.textContent = "密钥已生成；请复制保存。部署按钮会在 GitHub Pages 发布后启用。";
+    }
   });
 
   copyButton?.addEventListener("click", async () => {

@@ -1,2 +1,2 @@
 # Generate a unique value in docs/index.html or with: openssl rand -hex 32
-MASTER_KEY=replace-with-64-lowercase-hex-characters-before-local-development
+MASTER_KEY=
