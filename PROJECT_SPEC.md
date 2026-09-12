@@ -345,7 +345,7 @@ ON processed_batches(server_updated_at, device_id, batch_id);
 {
   "ok": true,
   "data": {
-    "schema_version": 1,
+    "schema_version": 2,
     "api_version": 1,
     "current_change_seq": 1288,
     "min_valid_change_seq": 0,
@@ -547,7 +547,7 @@ create、update、upsert 和 delete 共用请求 DTO；四种操作的 `data` �
     "session_id": "0198-session-1",
     "phase": "downloading",
     "baseline_seq": 1280,
-    "schema_version": 1,
+    "schema_version": 2,
     "expires_at": 1786500900000
   }
 }
@@ -579,7 +579,7 @@ create、update、upsert 和 delete 共用请求 DTO；四种操作的 `data` �
 }
 ```
 
-`data` 不接受表名，按 `sync_tables.table_order`、表内 `id ASC` 自动跨表分页，数据来自 primary 并包含墓碑。cursor 是 `base64url(canonical JSON + SHA-256 checksum)` 的无状态 keyset 位置，包含版本、session、schema、表序号和最后 ID；客户端可信，checksum 只用于发现损坏和客户端 bug，不作为防伪安全边界。相同参数可重复请求同一页，重复行必须可安全覆盖暂存区。
+`data` 不接受表名，按 `sync_tables.table_order`、表内 `id ASC` 自动跨表分页，数据来自 primary 并包含墓碑。 实现按代码白名单逐表执行主键范围查询，避免超出 D1 复合查询项数限制；数据与变更分页均设约 1 MiB 页预算，客户端以 `has_more` 而非返回条数判断结束。cursor 是 `base64url(canonical JSON + SHA-256 checksum)` 的无状态 keyset 位置，包含版本、session、schema、表序号和最后 ID；客户端可信，checksum 只用于发现损坏和客户端 bug，不作为防伪安全边界。相同参数可重复请求同一页，重复行必须可安全覆盖暂存区。
 
 `limit` 必须在 1–500；`data` 和 `changes` 每次最多返回 500 条结果。
 

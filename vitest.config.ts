@@ -9,6 +9,7 @@ export default defineConfig(async () => {
       cloudflareTest({
         wrangler: { configPath: "./wrangler.jsonc" },
         miniflare: {
+          d1Databases: ["MIGRATION_DB"],
           bindings: {
             MASTER_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             TEST_MIGRATIONS: migrations,

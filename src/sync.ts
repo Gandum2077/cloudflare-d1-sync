@@ -1,6 +1,8 @@
+import { archiveParentId, exclusiveField, hasRequiredFields } from "./domain";
 import { SQL } from "./service";
 import {
   API_VERSION,
+  MAX_PAGE_BYTES,
   ApiError,
   type ChangeResult,
   type DeviceRow,
@@ -41,6 +43,9 @@ interface PreflightRow {
   op_index: number;
   entity_json: string | null;
   processed_json: string | null;
+  parent_exists: number;
+  has_children: number;
+  exclusive_owner: string | null;
 }
 
 function parseJsonObject(value: string): JsonObject {
@@ -89,18 +94,9 @@ function parseOperationResults(value: string, replayed: boolean): OperationResul
   });
 }
 
-function allRequiredFieldsPresent(operation: SyncOperation): boolean {
-  const data = operation.data;
-  if (data === undefined) return false;
-  if (operation.table === "bookmarks") {
-    return ["url", "title", "note", "tags_json"].every((field) => field in data);
-  }
-  return "value_json" in data;
-}
-
 function preflightError(operation: SyncOperation, entity: EntityState | null): JsonObject | null {
   if (operation.operation === "create") {
-    if (!allRequiredFieldsPresent(operation)) {
+    if (!hasRequiredFields(operation.table, operation.data)) {
       return { op_id: operation.op_id, code: "INVALID_REQUEST", message: "create is missing required fields" };
     }
     if (entity !== null) {
@@ -110,7 +106,7 @@ function preflightError(operation: SyncOperation, entity: EntityState | null): J
   }
 
   if (operation.operation === "upsert") {
-    if (entity === null && !allRequiredFieldsPresent(operation)) {
+    if (entity === null && !hasRequiredFields(operation.table, operation.data)) {
       return {
         op_id: operation.op_id,
         code: "INVALID_REQUEST",
@@ -144,6 +140,8 @@ async function preflightOperations(
         op_id: operation.op_id,
         table: operation.table,
         entity_id: operation.entity_id,
+        operation: operation.operation,
+        parent_id: archiveParentId(operation.table, operation.entity_id),
       }))),
       deviceId,
     )
@@ -151,6 +149,7 @@ async function preflightOperations(
 
   const errors: JsonObject[] = [];
   const entries: PreflightEntry[] = [];
+  const exclusiveOwners = new Map<string, string | null>();
   for (const [index, operation] of operations.entries()) {
     const requestHash = operationHashes[index];
     const row = preflightRows.results[index];
@@ -171,6 +170,27 @@ async function preflightOperations(
     } else {
       const error = preflightError(operation, entity);
       if (error !== null) errors.push(error);
+      const parentId = archiveParentId(operation.table, operation.entity_id);
+      if (parentId !== null && operation.operation !== "delete") {
+        const earlierParent = entries.find((entry) => entry.operation.table === "archive_entries_v2" && entry.operation.entity_id === parentId);
+        const parentExists = earlierParent === undefined ? row.parent_exists === 1 : earlierParent.operation.operation !== "delete";
+        if (!parentExists) errors.push({ op_id: operation.op_id, code: "ENTITY_NOT_FOUND", message: "archive parent must exist before this operation" });
+      }
+      if (operation.table === "archive_entries_v2" && operation.operation === "delete") {
+        const earlierChild = entries.some((entry) => entry.operation.operation !== "delete" &&
+          archiveParentId(entry.operation.table, entry.operation.entity_id) === operation.entity_id);
+        if (row.has_children === 1 || earlierChild) errors.push({ op_id: operation.op_id, code: "CONFLICT", message: "delete archive dependents before their parent" });
+      }
+      const exclusive = exclusiveField(operation.table);
+      if (exclusive !== null) {
+        if (!exclusiveOwners.has(operation.table)) exclusiveOwners.set(operation.table, row.exclusive_owner);
+        const owner = exclusiveOwners.get(operation.table);
+        const selected = operation.operation !== "delete" && (operation.data?.[exclusive] ?? entity?.json[exclusive] ?? 0) === 1;
+        if (selected && owner !== null && owner !== operation.entity_id) {
+          errors.push({ op_id: operation.op_id, code: "CONFLICT", message: "clear the existing selection before selecting another entity" });
+        } else if (selected) exclusiveOwners.set(operation.table, operation.entity_id);
+        else if (owner === operation.entity_id) exclusiveOwners.set(operation.table, null);
+      }
     }
     entries.push({ operation, entity, requestHash });
   }
@@ -187,11 +207,6 @@ async function preflightOperations(
   return entries;
 }
 
-function stringData(data: JsonObject | undefined, key: string): string | undefined {
-  const value = data?.[key];
-  return typeof value === "string" ? value : undefined;
-}
-
 function operationStatements(
   db: D1Database,
   entry: PreflightEntry,
@@ -200,165 +215,19 @@ function operationStatements(
   now: number,
 ): D1PreparedStatement[] {
   const { operation, requestHash } = entry;
-  const statements: D1PreparedStatement[] = [];
-  const data = operation.data;
-
-  if (operation.table === "bookmarks") {
-    const url = stringData(data, "url");
-    const title = stringData(data, "title");
-    const note = stringData(data, "note");
-    const tagsJson = stringData(data, "tags_json");
-    if (operation.operation === "create") {
-      statements.push(
-        db.prepare(SQL.bookmarkCreate).bind(
-          operation.entity_id,
-          now,
-          deviceId,
-          deviceId,
-          url,
-          title,
-          note,
-          tagsJson,
-        ),
-      );
-    } else if (operation.operation === "update") {
-      statements.push(
-        db.prepare(SQL.bookmarkUpdate).bind(
-          now,
-          deviceId,
-          url === undefined ? 0 : 1,
-          url ?? operation.entity_id,
-          title === undefined ? 0 : 1,
-          title ?? "",
-          note === undefined ? 0 : 1,
-          note ?? "",
-          tagsJson === undefined ? 0 : 1,
-          tagsJson ?? "[]",
-          operation.entity_id,
-          operation.base_sync_version,
-        ),
-      );
-    } else if (operation.operation === "upsert") {
-      statements.push(
-        db.prepare(SQL.bookmarkUpsert).bind(
-          operation.entity_id,
-          now,
-          deviceId,
-          deviceId,
-          url ?? operation.entity_id,
-          title ?? "",
-          note ?? "",
-          tagsJson ?? "[]",
-          url === undefined ? 0 : 1,
-          title === undefined ? 0 : 1,
-          note === undefined ? 0 : 1,
-          tagsJson === undefined ? 0 : 1,
-        ),
-      );
-    } else {
-      statements.push(
-        db.prepare(SQL.bookmarkDelete).bind(
-          now,
-          deviceId,
-          operation.entity_id,
-          operation.base_sync_version,
-        ),
-      );
-    }
-    statements.push(db.prepare(SQL.assertionChanges));
-    const changeOperation = operation.operation === "upsert" ? "upsert" : operation.operation;
-    statements.push(
-      db.prepare(SQL.bookmarkChangeInsert).bind(
-        changeOperation,
-        operation.operation === "delete" ? "delete" : operation.operation,
-        now,
-        deviceId,
-        now,
-        operation.entity_id,
-      ),
-    );
-    statements.push(
-      db.prepare(SQL.bookmarkProcessedOpInsert).bind(
-        deviceId,
-        operation.op_id,
-        batchId,
-        requestHash,
-        operation.op_id,
-        operation.entity_id,
-        now,
-        operation.entity_id,
-      ),
-    );
-  } else {
-    const valueJson = stringData(data, "value_json");
-    if (operation.operation === "create") {
-      statements.push(
-        db.prepare(SQL.settingCreate).bind(
-          operation.entity_id,
-          now,
-          deviceId,
-          deviceId,
-          valueJson,
-        ),
-      );
-    } else if (operation.operation === "update") {
-      statements.push(
-        db.prepare(SQL.settingUpdate).bind(
-          now,
-          deviceId,
-          valueJson,
-          operation.entity_id,
-          operation.base_sync_version,
-        ),
-      );
-    } else if (operation.operation === "upsert") {
-      statements.push(
-        db.prepare(SQL.settingUpsert).bind(
-          operation.entity_id,
-          now,
-          deviceId,
-          deviceId,
-          valueJson ?? "null",
-          valueJson === undefined ? 0 : 1,
-        ),
-      );
-    } else {
-      statements.push(
-        db.prepare(SQL.settingDelete).bind(
-          now,
-          deviceId,
-          operation.entity_id,
-          operation.base_sync_version,
-        ),
-      );
-    }
-    statements.push(db.prepare(SQL.assertionChanges));
-    const changeOperation = operation.operation === "upsert" ? "upsert" : operation.operation;
-    statements.push(
-      db.prepare(SQL.settingChangeInsert).bind(
-        changeOperation,
-        operation.operation === "delete" ? "delete" : operation.operation,
-        now,
-        deviceId,
-        now,
-        operation.entity_id,
-      ),
-    );
-    statements.push(
-      db.prepare(SQL.settingProcessedOpInsert).bind(
-        deviceId,
-        operation.op_id,
-        batchId,
-        requestHash,
-        operation.op_id,
-        operation.entity_id,
-        now,
-        operation.entity_id,
-      ),
-    );
-  }
-
-  return statements;
+  const sql = SQL.entities[operation.table];
+  const parameters: (string | number | null)[] = [
+    operation.entity_id, JSON.stringify(operation.data ?? {}), now, deviceId,
+  ];
+  if (operation.operation === "update" || operation.operation === "delete") parameters.push(operation.base_sync_version);
+  return [
+    db.prepare(sql[operation.operation]).bind(...parameters),
+    db.prepare(SQL.assertionChanges),
+    db.prepare(sql.changeInsert).bind(operation.operation, operation.operation, now, deviceId, now, operation.entity_id),
+    db.prepare(sql.processedOpInsert).bind(
+      deviceId, operation.op_id, batchId, requestHash, operation.op_id, operation.entity_id, now, operation.entity_id,
+    ),
+  ];
 }
 
 function parseChanges(value: string): ChangeResult[] {
@@ -410,7 +279,7 @@ async function pullChanges(
   cursor: number,
   limit: number,
 ): Promise<{ changes: ChangeResult[]; nextCursor: number; hasMore: boolean }> {
-  const row = await db.prepare(SQL.pullChanges).bind(cursor, limit).first<PullRow>();
+  const row = await db.prepare(SQL.pullChanges).bind(cursor, limit, MAX_PAGE_BYTES).first<PullRow>();
   if (row === null) throw new ApiError(503, "DATABASE_UNAVAILABLE", "database is unavailable");
   const changes = parseChanges(row.changes_json);
   return {
@@ -542,10 +411,11 @@ export async function executeSync(
           } catch (diagnosed) {
             if (diagnosed instanceof ApiError) throw diagnosed;
           }
-          console.error(JSON.stringify({
-            message: "atomic sync batch failed",
-            error: error instanceof Error ? error.message : "unknown database error",
-          }));
+          if (error instanceof Error && /SQLITE_CONSTRAINT|constraint failed/iu.test(error.message)) {
+            throw new ApiError(409, "BATCH_REJECTED", "a business constraint rejected this batch");
+          }
+          // Database errors may contain bound values; never log the raw error.
+          console.error(JSON.stringify({ message: "atomic sync batch failed" }));
           throw new ApiError(503, "DATABASE_UNAVAILABLE", "database transaction failed; retry the same batch");
         }
       }

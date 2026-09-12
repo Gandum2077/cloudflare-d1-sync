@@ -24,7 +24,7 @@ import {
 } from "./full-sync";
 import { resolveRoute, SQL } from "./service";
 import { executeSync } from "./sync";
-import { API_VERSION, ApiError, SCHEMA_VERSION, type DeviceRow, type JsonObject } from "./types";
+import { API_VERSION, ApiError, ENTITY_TABLES, SCHEMA_VERSION, type DeviceRow, type JsonObject } from "./types";
 import { parseSyncRequest, readJsonBody } from "./validation";
 
 function clientSubject(request: Request): string {
@@ -39,15 +39,15 @@ async function info(db: D1Database): Promise<Response> {
       min_valid_change_seq: number;
       current_change_seq: number;
     }>(),
-    db.prepare(SQL.syncTables).all<{ table_name: string; schema_version: number }>(),
+    db.prepare(SQL.syncTables).all<{ table_name: string; table_order: number; schema_version: number }>(),
   ]);
   if (profile === null) throw new ApiError(503, "DATABASE_UNAVAILABLE", "database is unavailable");
-  const expected = ["bookmarks", "settings"];
+  const expected = [...ENTITY_TABLES];
   if (
     profile.schema_version !== SCHEMA_VERSION ||
     profile.api_version !== API_VERSION ||
     tables.results.length !== expected.length ||
-    tables.results.some((table, index) => table.table_name !== expected[index] || table.schema_version !== 1)
+    tables.results.some((table, index) => table.table_name !== expected[index] || table.schema_version !== 1 || table.table_order !== index + 1)
   ) {
     throw new ApiError(500, "INTERNAL_ERROR", "database schema does not match this Worker version");
   }

@@ -2,16 +2,16 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { api, bind, dataOf, errorOf, json } from "./helpers";
 
-const bookmarkId = "https://example.com/path?a=1";
+const archiveId = "12345";
 
-function bookmarkCreate(opId: string, entityId = bookmarkId): Record<string, unknown> {
+function archiveCreate(opId: string, entityId = archiveId): Record<string, unknown> {
   return {
     op_id: opId,
-    table: "bookmarks",
+    table: "archive_entries_v2",
     entity_id: entityId,
     operation: "create",
     base_sync_version: null,
-    data: { url: entityId, title: "Example", note: "Note", tags_json: '["docs"]' },
+    data: { title: "Example", comment: "Note", taglist_json: '[{"namespace":"misc","tags":["docs"]}]' },
   };
 }
 
@@ -23,7 +23,7 @@ async function sync(
 }
 
 describe.sequential("atomic incremental sync", () => {
-  it("creates a bookmark, returns its change, and replays the batch idempotently", async () => {
+  it("creates a archive entry, returns its change, and replays the batch idempotently", async () => {
     await bind("sync-a", "Sync A");
     await bind("sync-b", "Sync B");
     const body = {
@@ -31,7 +31,7 @@ describe.sequential("atomic incremental sync", () => {
       cursor: 0,
       ack_cursor: 0,
       limit: 200,
-      operations: [bookmarkCreate("op-create")],
+      operations: [archiveCreate("op-create")],
     };
     const created = await sync("sync-a", body);
     expect(created.status).toBe(200);
@@ -40,7 +40,7 @@ describe.sequential("atomic incremental sync", () => {
     const changes = createdData.changes as Record<string, unknown>[];
     expect(results[0]).toMatchObject({ status: "applied", sync_version: 0, change_seq: 1 });
     expect(changes).toHaveLength(1);
-    expect(changes[0]).toMatchObject({ change_seq: 1, table: "bookmarks", operation: "create" });
+    expect(changes[0]).toMatchObject({ change_seq: 1, table: "archive_entries_v2", operation: "create" });
 
     const replay = await sync("sync-a", body);
     expect(replay.status).toBe(200);
@@ -57,8 +57,8 @@ describe.sequential("atomic incremental sync", () => {
       limit: 200,
       operations: [{
         op_id: "op-update",
-        table: "bookmarks",
-        entity_id: bookmarkId,
+        table: "archive_entries_v2",
+        entity_id: archiveId,
         operation: "update",
         base_sync_version: 0,
         data: { title: "Updated" },
@@ -77,11 +77,11 @@ describe.sequential("atomic incremental sync", () => {
       limit: 200,
       operations: [{
         op_id: "op-stale",
-        table: "bookmarks",
-        entity_id: bookmarkId,
+        table: "archive_entries_v2",
+        entity_id: archiveId,
         operation: "update",
         base_sync_version: 0,
-        data: { note: "Stale" },
+        data: { comment: "Stale" },
       }],
     });
     expect(stale.status).toBe(409);
@@ -89,7 +89,7 @@ describe.sequential("atomic incremental sync", () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM changes").first<number>("count")).toBe(2);
   });
 
-  it("upserts settings, rejects op id reuse, and pulls changes on another device", async () => {
+  it("upserts webdav_services_v2, rejects op id reuse, and pulls changes on another device", async () => {
     const upsert = await sync("sync-a", {
       batch_id: "batch-setting",
       cursor: 2,
@@ -97,11 +97,11 @@ describe.sequential("atomic incremental sync", () => {
       limit: 200,
       operations: [{
         op_id: "op-setting",
-        table: "settings",
+        table: "webdav_services_v2",
         entity_id: "theme",
         operation: "upsert",
         base_sync_version: null,
-        data: { value_json: '{"mode":"dark"}' },
+        data: { name: '{"mode":"dark"}' },
       }],
     });
     expect(upsert.status).toBe(200);
@@ -113,11 +113,11 @@ describe.sequential("atomic incremental sync", () => {
       limit: 200,
       operations: [{
         op_id: "op-setting",
-        table: "settings",
+        table: "webdav_services_v2",
         entity_id: "other",
         operation: "create",
         base_sync_version: null,
-        data: { value_json: "true" },
+        data: { name: "true" },
       }],
     });
     expect(reused.status).toBe(409);
@@ -132,18 +132,18 @@ describe.sequential("atomic incremental sync", () => {
   });
 
   it("rolls back an entire mixed batch when one operation conflicts", async () => {
-    const freshId = "https://example.com/fresh";
+    const freshId = "12346";
     const response = await sync("sync-a", {
       batch_id: "batch-atomic-reject",
       cursor: 3,
       ack_cursor: 3,
       limit: 200,
       operations: [
-        bookmarkCreate("op-fresh", freshId),
+        archiveCreate("op-fresh", freshId),
         {
           op_id: "op-conflict",
-          table: "bookmarks",
-          entity_id: bookmarkId,
+          table: "archive_entries_v2",
+          entity_id: archiveId,
           operation: "update",
           base_sync_version: 0,
           data: { title: "Will not happen" },
@@ -151,7 +151,7 @@ describe.sequential("atomic incremental sync", () => {
       ],
     });
     expect(response.status).toBe(409);
-    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM bookmarks WHERE id = ?").bind(freshId).first<number>("count")).toBe(0);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM archive_entries_v2 WHERE id = ?").bind(freshId).first<number>("count")).toBe(0);
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM processed_batches WHERE batch_id = ?").bind("batch-atomic-reject").first<number>("count")).toBe(0);
   });
 
@@ -162,28 +162,28 @@ describe.sequential("atomic incremental sync", () => {
       ack_cursor: 3,
       limit: 200,
       operations: [
-        { op_id: "dup-1", table: "settings", entity_id: "theme", operation: "update", base_sync_version: 0, data: { value_json: "1" } },
-        { op_id: "dup-2", table: "settings", entity_id: "theme", operation: "delete", base_sync_version: 0 },
+        { op_id: "dup-1", table: "webdav_services_v2", entity_id: "theme", operation: "update", base_sync_version: 0, data: { name: "1" } },
+        { op_id: "dup-2", table: "webdav_services_v2", entity_id: "theme", operation: "delete", base_sync_version: 0 },
       ],
     });
     expect(duplicate.status).toBe(400);
     expect(errorOf(await json(duplicate)).code).toBe("DUPLICATE_ENTITY_IN_BATCH");
 
     const deleted = await sync("sync-a", {
-      batch_id: "delete-bookmark",
+      batch_id: "delete-archive entry",
       cursor: 3,
       ack_cursor: 3,
       limit: 200,
       operations: [{
         op_id: "op-delete",
-        table: "bookmarks",
-        entity_id: bookmarkId,
+        table: "archive_entries_v2",
+        entity_id: archiveId,
         operation: "delete",
         base_sync_version: 1,
       }],
     });
     expect(deleted.status).toBe(200);
-    const row = await env.DB.prepare("SELECT deleted, sync_version FROM bookmarks WHERE id = ?").bind(bookmarkId).first<{
+    const row = await env.DB.prepare("SELECT deleted, sync_version FROM archive_entries_v2 WHERE id = ?").bind(archiveId).first<{
       deleted: number;
       sync_version: number;
     }>();
@@ -193,11 +193,11 @@ describe.sequential("atomic incremental sync", () => {
   it("commits the maximum eight-operation batch atomically", async () => {
     const operations = Array.from({ length: 8 }, (_, index) => ({
       op_id: `max-op-${index}`,
-      table: "settings",
+      table: "webdav_services_v2",
       entity_id: `max-setting-${index}`,
       operation: "create",
       base_sync_version: null,
-      data: { value_json: JSON.stringify({ index }) },
+      data: { name: JSON.stringify({ index }) },
     }));
     const response = await sync("sync-a", {
       batch_id: "max-eight-batch",
@@ -209,7 +209,7 @@ describe.sequential("atomic incremental sync", () => {
     expect(response.status).toBe(200);
     expect(dataOf(await json(response)).results).toHaveLength(8);
     expect(
-      await env.DB.prepare("SELECT COUNT(*) AS count FROM settings WHERE id LIKE 'max-setting-%'").first<number>("count"),
+      await env.DB.prepare("SELECT COUNT(*) AS count FROM webdav_services_v2 WHERE id LIKE 'max-setting-%'").first<number>("count"),
     ).toBe(8);
   });
 });

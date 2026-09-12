@@ -1,6 +1,7 @@
 import { SQL } from "./service";
 import {
   ApiError,
+  ENTITY_TABLES,
   MAX_HISTORY_ROWS,
   MAX_OPERATIONS,
   RETENTION_MS,
@@ -33,8 +34,8 @@ function cleanupStatements(
     db.prepare(SQL.cleanupClearPointers),
     db.prepare(SQL.cleanupChanges).bind(floor),
     db.prepare(SQL.cleanupProfileFloor).bind(floor),
-    db.prepare(SQL.cleanupBookmarkTombstones).bind(cutoff),
-    db.prepare(SQL.cleanupSettingTombstones).bind(cutoff),
+    ...ENTITY_TABLES.filter((table) => table !== "global_reader_config_v2")
+      .map((table) => db.prepare(SQL.entities[table].cleanupTombstones).bind(cutoff)),
     db.prepare(SQL.cleanupOpsByAge).bind(cutoff),
     db.prepare(SQL.cleanupBatchesByAge).bind(cutoff),
     db.prepare(SQL.cleanupOpsByCapacity).bind(retainedBatches),

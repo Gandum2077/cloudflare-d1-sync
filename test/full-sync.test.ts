@@ -17,11 +17,11 @@ describe.sequential("full sync sessions", () => {
       limit: 200,
       operations: [{
         op_id: "full-seed-op",
-        table: "settings",
+        table: "webdav_services_v2",
         entity_id: "language",
         operation: "create",
         base_sync_version: null,
-        data: { value_json: '"zh-CN"' },
+        data: { name: '"zh-CN"' },
       }],
     });
     expect(create.status).toBe(200);
@@ -49,7 +49,7 @@ describe.sequential("full sync sessions", () => {
     expect(page.status).toBe(200);
     const pageData = dataOf(await json(page));
     expect(pageData.has_more).toBe(false);
-    expect((pageData.rows as Record<string, unknown>[])[0]?.table).toBe("settings");
+    expect((pageData.rows as Record<string, unknown>[])[0]?.table).toBe("webdav_services_v2");
     const terminalCursor = pageData.terminal_cursor as string;
 
     const update = await post("/v1/sync", "full-source", {
@@ -59,11 +59,11 @@ describe.sequential("full sync sessions", () => {
       limit: 200,
       operations: [{
         op_id: "full-update-op",
-        table: "settings",
+        table: "webdav_services_v2",
         entity_id: "language",
         operation: "update",
         base_sync_version: 0,
-        data: { value_json: '"en-US"' },
+        data: { name: '"en-US"' },
       }],
     });
     expect(update.status).toBe(200);
@@ -83,7 +83,7 @@ describe.sequential("full sync sessions", () => {
     expect(changes.status).toBe(200);
     const changeRows = dataOf(await json(changes)).changes as Record<string, unknown>[];
     expect(changeRows).toHaveLength(1);
-    expect(changeRows[0]).toMatchObject({ change_seq: 2, table: "settings", operation: "update" });
+    expect(changeRows[0]).toMatchObject({ change_seq: 2, table: "webdav_services_v2", operation: "update" });
     expect(changeRows[0]?.payload).toBeTruthy();
 
     const completed = await post("/v1/full-sync/complete", "full-target", {

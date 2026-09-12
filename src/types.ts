@@ -1,9 +1,10 @@
 export const API_VERSION = 1;
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const MAX_REQUEST_BYTES = 128 * 1024;
 export const MAX_OPERATIONS = 8;
 export const MAX_SYNC_LIMIT = 200;
 export const MAX_FULL_SYNC_LIMIT = 500;
+export const MAX_PAGE_BYTES = 1024 * 1024;
 export const MAX_ACTIVE_FULL_SYNCS = 3;
 export const FULL_SYNC_LEASE_MS = 15 * 60 * 1000;
 export const FULL_SYNC_MAX_AGE_MS = 2 * 60 * 60 * 1000;
@@ -87,31 +88,23 @@ export interface ProfileRow {
   current_change_seq: number;
 }
 
-export interface BookmarkRow {
-  id: string;
-  sync_version: number;
-  deleted: number;
-  server_updated_at: number;
-  created_by_device_id: string | null;
-  updated_by_device_id: string | null;
-  url: string;
-  title: string;
-  note: string;
-  tags_json: string;
-}
-
-export interface SettingRow {
-  id: string;
-  sync_version: number;
-  deleted: number;
-  server_updated_at: number;
-  created_by_device_id: string | null;
-  updated_by_device_id: string | null;
-  value_json: string;
-}
-
-export type EntityRow = BookmarkRow | SettingRow;
-export type EntityTable = "bookmarks" | "settings";
+export const ENTITY_TABLES = [
+  "archive_entries_v2",
+  "archive_read_state_v2",
+  "archive_favorite_state_v2",
+  "archive_rate_state_v2",
+  "gallery_reader_config_v2",
+  "global_reader_config_v2",
+  "search_history_v2",
+  "search_bookmarks_v2",
+  "ai_translation_services_v2",
+  "webdav_services_v2",
+  "local_marked_tags_v2",
+  "marked_uploaders_v2",
+  "tag_access_count_v2",
+  "favorite_images_v2",
+] as const;
+export type EntityTable = (typeof ENTITY_TABLES)[number];
 export type OperationKind = "create" | "update" | "upsert" | "delete";
 
 export interface SyncOperation {
@@ -182,5 +175,5 @@ export interface ResolvedRoute extends RouteDefinition {
 }
 
 export function isEntityTable(value: string): value is EntityTable {
-  return value === "bookmarks" || value === "settings";
+  return ENTITY_TABLES.some((table) => table === value);
 }

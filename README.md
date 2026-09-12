@@ -2,6 +2,10 @@
 
 一个面向单用户、自托管场景的离线优先同步服务。Cloudflare Worker 负责主密钥鉴权、字段校验、乐观并发控制和完整同步；D1 保存业务实体、墓碑、全局变更流水与幂等结果。
 
+业务表定义见 [DOMAIN_TABLES.md](./DOMAIN_TABLES.md)，客户端原始结构见 [db.sql](./db.sql)。Worker 同步 14 张业务实体表；本地附属表折叠到父实体的 JSON 字段，本地专用表和 WebDAV 凭据不上传。
+
+当前数据库结构版本为 2。`0002_domain_tables.sql` 会删除研发阶段的 `bookmarks/settings` 示例数据及旧同步历史，保留已绑定设备；已有客户端需丢弃旧游标和待重试的示例批次，重新完整同步。
+
 ## 特性
 
 - 一个 256-bit `MASTER_KEY`，无账号系统、无第三方服务。

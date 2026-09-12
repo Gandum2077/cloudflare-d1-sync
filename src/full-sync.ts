@@ -1,11 +1,14 @@
 import { SQL } from "./service";
 import {
   ApiError,
+  ENTITY_TABLES,
+  type EntityTable,
   FULL_SYNC_COMPLETE_GRACE_MS,
   FULL_SYNC_LEASE_MS,
   FULL_SYNC_MAX_AGE_MS,
   MAX_ACTIVE_FULL_SYNCS,
   MAX_FULL_SYNC_LIMIT,
+  MAX_PAGE_BYTES,
   SCHEMA_VERSION,
   type FullSyncSessionRow,
   type JsonObject,
@@ -33,14 +36,15 @@ interface FullCursor {
 
 interface FullDataRow {
   table_order: number;
-  table_name: "bookmarks" | "settings";
+  table_name: EntityTable;
   entity_id: string;
   entity_json: string;
+  entity_bytes: number;
 }
 
 interface FullChangeRow {
   change_seq: number;
-  entity_table: "bookmarks" | "settings";
+  entity_table: EntityTable;
   operation: "create" | "update" | "delete";
   payload_json: string | null;
 }
@@ -252,27 +256,28 @@ export async function readFullSyncData(
     position.schema !== session.schema_version ||
     position.terminal ||
     position.table_order < 1 ||
-    position.table_order > 2
+    position.table_order > ENTITY_TABLES.length
   ) {
     throw new ApiError(400, "INVALID_CURSOR", "cursor does not match this full sync session");
   }
 
   const renewedExpiry = Math.min(now + FULL_SYNC_LEASE_MS, session.created_at + FULL_SYNC_MAX_AGE_MS);
-  const results = await db.batch<FullDataRow>([
-    db.prepare(SQL.fullRenew).bind(renewedExpiry, FULL_SYNC_MAX_AGE_MS, sessionId),
-    db.prepare(SQL.fullDataPage).bind(
-      position.table_order,
-      position.table_order,
-      position.last_id,
-      position.table_order,
-      position.table_order,
-      position.last_id,
-      limit + 1,
-    ),
-  ]);
-  const allRows = results[1]?.results ?? [];
-  const hasMore = allRows.length > limit;
-  const pageRows = hasMore ? allRows.slice(0, limit) : allRows;
+  await db.prepare(SQL.fullRenew).bind(renewedExpiry, FULL_SYNC_MAX_AGE_MS, sessionId).run();
+  const allRows: FullDataRow[] = [];
+  let bytes = 0;
+  for (const [index, table] of ENTITY_TABLES.entries()) {
+    if (index + 1 < position.table_order) continue;
+    const page = await db.prepare(SQL.entities[table].fullDataPage).bind(
+      index + 1 === position.table_order ? position.last_id : "",
+      limit + 1 - allRows.length,
+      MAX_PAGE_BYTES - bytes,
+    ).all<FullDataRow>();
+    allRows.push(...page.results);
+    bytes += page.results.reduce((sum, row) => sum + row.entity_bytes, 0);
+    if (allRows.length > limit || bytes > MAX_PAGE_BYTES) break;
+  }
+  const hasMore = allRows.length > limit || bytes > MAX_PAGE_BYTES;
+  const pageRows = hasMore ? allRows.slice(0, -1) : allRows;
   const rows: JsonObject[] = pageRows.map((row) => ({
     table: row.table_name,
     entity: parseStoredObject(row.entity_json),
@@ -351,7 +356,7 @@ export async function readFullSyncChanges(
   const renewedExpiry = Math.min(now + FULL_SYNC_LEASE_MS, session.created_at + FULL_SYNC_MAX_AGE_MS);
   const results = await db.batch<FullChangeRow>([
     db.prepare(SQL.fullRenew).bind(renewedExpiry, FULL_SYNC_MAX_AGE_MS, sessionId),
-    db.prepare(SQL.fullChanges).bind(cursor, session.target_seq, limit),
+    db.prepare(SQL.fullChanges).bind(cursor, session.target_seq, limit, MAX_PAGE_BYTES),
   ]);
   const rows = results[1]?.results ?? [];
   const changes: JsonObject[] = rows.map((row) => {

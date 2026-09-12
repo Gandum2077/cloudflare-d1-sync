@@ -1,3 +1,4 @@
+import { ARCHIVE_STATE_TABLES, DOMAIN_FIELDS, type FieldRule } from "./domain";
 import {
   API_VERSION,
   ApiError,
@@ -154,39 +155,92 @@ export async function sha256Hex(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-export function normalizeBookmarkUrl(input: string): string {
-  if (input !== input.trim()) invalid("bookmark url must not contain surrounding whitespace");
-  let parsed: URL;
-  try {
-    parsed = new URL(input);
-  } catch {
-    invalid("bookmark url must be an absolute HTTP(S) URL");
+function boundedText(value: unknown, name: string, minimum: number, maximum: number): string {
+  const result = requiredString(value, name, minimum, maximum);
+  if (result.includes("\0") || encoder.encode(result).byteLength > maximum) {
+    invalid(`${name} contains NUL or exceeds its UTF-8 byte limit`);
   }
-  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.origin === "null") {
-    invalid("bookmark url must be an absolute HTTP(S) URL");
-  }
-  if (parsed.username !== "" || parsed.password !== "") {
-    invalid("bookmark url must not contain embedded credentials");
-  }
-
-  const raw = input.match(/^(https?):\/\/[^/?#]+([^?#]*)(\?[^#]*)?(?:#.*)?$/i);
-  if (raw === null) invalid("bookmark url must be an absolute HTTP(S) URL");
-  const path = raw[2] === "" || raw[2] === undefined ? "/" : raw[2];
-  const query = raw[3] ?? "";
-  const port = parsed.port === "" ? "" : `:${parsed.port}`;
-  return `${parsed.protocol}//${parsed.hostname.toLowerCase()}${port}${path}${query}`;
+  return result;
 }
 
-function validateJsonText(value: unknown, name: string, requireArray: boolean): string {
-  if (typeof value !== "string") invalid(`${name} must be a JSON string`);
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (requireArray && !Array.isArray(parsed)) invalid(`${name} must encode a JSON array`);
-  } catch (error) {
-    if (error instanceof ApiError) throw error;
-    invalid(`${name} must contain valid JSON`);
+function validateAttachment(value: unknown, kind: "taglist" | "search_terms", name: string): string {
+  const source = boundedText(value, name, 2, 65536);
+  let parsed: unknown;
+  try { parsed = JSON.parse(source) as unknown; } catch { invalid(`${name} must contain valid JSON`); }
+  if (!Array.isArray(parsed) || parsed.length > (kind === "taglist" ? 256 : 100)) {
+    invalid(`${name} must encode a bounded array`);
   }
+  const namespaces = new Set<string>();
+  let totalTags = 0;
+  const normalized = parsed.map((item: unknown, index: number): JsonObject => {
+    const label = `${name}[${index}]`;
+    const object = assertObject(item, label);
+    if (kind === "taglist") {
+      assertOnlyKeys(object, ["namespace", "tags"], label);
+      const namespace = boundedText(object.namespace, `${label}.namespace`, 0, 512);
+      if (namespaces.has(namespace)) invalid(`${name} contains duplicate namespaces`);
+      namespaces.add(namespace);
+      if (!Array.isArray(object.tags) || object.tags.length > 256) invalid(`${label}.tags must be an array of at most 256 strings`);
+      totalTags += object.tags.length;
+      if (totalTags > 4096) invalid(`${name} contains too many tags`);
+      const tags = object.tags.map((tag: unknown) => boundedText(tag, `${label}.tags`, 1, 512));
+      if (new Set(tags).size !== tags.length) invalid(`${label}.tags contains duplicates`);
+      return { namespace, tags };
+    }
+    assertOnlyKeys(object, ["namespace", "qualifier", "term", "dollar", "subtract", "tilde"], label);
+    const term: JsonObject = { term: boundedText(object.term, `${label}.term`, 0, 2048) };
+    for (const key of ["namespace", "qualifier"]) {
+      if (Object.hasOwn(object, key)) {
+        term[key] = object[key] === null ? null : boundedText(object[key], `${label}.${key}`, 0, 512);
+      }
+    }
+    for (const key of ["dollar", "subtract", "tilde"]) {
+      if (Object.hasOwn(object, key)) term[key] = integerInRange(object[key], `${label}.${key}`, 0, 1);
+    }
+    return term;
+  });
+  const canonical = canonicalJson(normalized);
+  if (encoder.encode(canonical).byteLength > 65536) invalid(`${name} exceeds its UTF-8 byte limit`);
+  return canonical;
+}
+
+function validateField(value: unknown, rule: FieldRule, name: string): JsonValue {
+  if (value === null && "nullable" in rule && rule.nullable) return null;
+  if (rule.kind === "taglist" || rule.kind === "search_terms") return validateAttachment(value, rule.kind, name);
+  if (rule.kind === "text") {
+    const result = boundedText(value, name, rule.min ?? 0, rule.max);
+    if (rule.values !== undefined && !rule.values.includes(result)) invalid(`${name} is not a supported option`);
+    return result;
+  }
+  if (rule.kind === "integer") return integerInRange(value, name, rule.min, rule.max);
+  if (typeof value !== "number" || !Number.isFinite(value)) invalid(`${name} must be a finite number`);
   return value;
+}
+
+function validateEntityId(table: EntityTable, value: unknown): string {
+  const limits: Partial<Record<EntityTable, number>> = {
+    archive_entries_v2: 32, archive_read_state_v2: 32, archive_favorite_state_v2: 32,
+    archive_rate_state_v2: 32, gallery_reader_config_v2: 32, global_reader_config_v2: 1,
+    search_history_v2: 8192, search_bookmarks_v2: 8192, local_marked_tags_v2: 1025,
+    marked_uploaders_v2: 512, tag_access_count_v2: 3074, favorite_images_v2: 64,
+  };
+  const id = boundedText(value, "operation.entity_id", 1, limits[table] ?? 200);
+  if ((table === "archive_entries_v2" || ARCHIVE_STATE_TABLES.some((name) => name === table)) && !/^[0-9]+$/u.test(id)) {
+    invalid("archive entity_id must be a decimal gid string");
+  }
+  if (table === "global_reader_config_v2" && id !== "1") invalid("global reader config entity_id must be 1");
+  if (table === "local_marked_tags_v2" || table === "tag_access_count_v2") {
+    const parts = id.split(":");
+    if (parts.length !== (table === "local_marked_tags_v2" ? 2 : 3)) invalid("entity_id must use the documented composite key");
+    parts.forEach((part, index) => boundedText(part, "entity_id component", table === "local_marked_tags_v2" ? 1 : 0, index === 2 ? 2048 : 512));
+  }
+  if (table === "favorite_images_v2") {
+    const parts = id.split(":");
+    if (parts.length !== 2 || parts.some((part) => !/^(0|[1-9][0-9]*)$/u.test(part) || !Number.isSafeInteger(Number(part)))) {
+      invalid("favorite image entity_id must be canonical gid:page_index with non-negative safe integers");
+    }
+  }
+  return id;
 }
 
 function validateOperationData(
@@ -195,39 +249,36 @@ function validateOperationData(
   operation: OperationKind,
   dataValue: unknown,
 ): JsonObject | undefined {
+  if (table === "global_reader_config_v2" && operation !== "upsert" && operation !== "update") {
+    invalid("global reader config only supports upsert and update");
+  }
+  if (table === "tag_access_count_v2" && operation === "upsert") invalid("tag access counts require OCC; upsert is not allowed");
   if (operation === "delete") {
     if (dataValue !== undefined) invalid("delete operations must not include data");
     return undefined;
   }
   const data = assertObject(dataValue, "operation.data");
-  const keys = Object.keys(data);
-  if ((operation === "update" || operation === "upsert") && keys.length === 0) {
-    invalid(`${operation} data must contain at least one writable field`);
+  const fields = DOMAIN_FIELDS[table];
+  assertOnlyKeys(data, Object.keys(fields), "operation.data");
+  if (operation === "update" && Object.keys(data).length === 0 && table !== "marked_uploaders_v2") {
+    invalid("update data must contain at least one writable field");
   }
-
-  if (table === "bookmarks") {
-    assertOnlyKeys(data, ["url", "title", "note", "tags_json"], "operation.data");
-    const normalized: JsonObject = {};
-    if (data.url !== undefined) {
-      const url = normalizeBookmarkUrl(requiredString(data.url, "operation.data.url", 1, 4096));
-      if (url !== entityId) invalid("bookmark entity_id must equal the normalized url");
-      normalized.url = url;
-    }
-    if (data.title !== undefined) normalized.title = requiredString(data.title, "operation.data.title", 0, 500);
-    if (data.note !== undefined) normalized.note = requiredString(data.note, "operation.data.note", 0, 10_000);
-    if (data.tags_json !== undefined) {
-      normalized.tags_json = validateJsonText(data.tags_json, "operation.data.tags_json", true);
-    }
-    if ((operation === "create" || operation === "upsert") && keys.length === 0) {
-      invalid(`${operation} data must not be empty`);
-    }
-    return normalized;
-  }
-
-  assertOnlyKeys(data, ["value_json"], "operation.data");
   const normalized: JsonObject = {};
-  if (data.value_json !== undefined) {
-    normalized.value_json = validateJsonText(data.value_json, "operation.data.value_json", false);
+  for (const [key, value] of Object.entries(data)) {
+    const rule = fields[key];
+    if (rule === undefined) invalid("unsupported business field");
+    normalized[key] = validateField(value, rule, `operation.data.${key}`);
+  }
+  const keyFields = table === "local_marked_tags_v2" ? ["namespace", "name"]
+    : table === "tag_access_count_v2" ? ["qualifier", "namespace", "term"]
+    : table === "favorite_images_v2" ? ["gid", "page_index"] : [];
+  const parts = entityId.split(":");
+  for (const [index, key] of keyFields.entries()) {
+    const value = normalized[key];
+    if (Object.hasOwn(normalized, key) &&
+      ((typeof value !== "string" && typeof value !== "number") || String(value) !== parts[index])) {
+      invalid(`operation.data.${key} does not match entity_id`);
+    }
   }
   return normalized;
 }
@@ -242,12 +293,7 @@ function parseOperation(value: unknown, index: number): SyncOperation {
   const opId = requiredString(raw.op_id, `operations[${index}].op_id`, 1, 200);
   if (typeof raw.table !== "string" || !isEntityTable(raw.table)) invalid("operation.table is not supported");
   const table = raw.table;
-  const entityId = requiredString(
-    raw.entity_id,
-    `operations[${index}].entity_id`,
-    1,
-    table === "bookmarks" ? 2048 : 200,
-  );
+  const entityId = validateEntityId(table, raw.entity_id);
   if (!(["create", "update", "upsert", "delete"] as const).includes(raw.operation as OperationKind)) {
     invalid("operation.operation is not supported");
   }
@@ -257,10 +303,6 @@ function parseOperation(value: unknown, index: number): SyncOperation {
     if (base !== null) invalid(`${operation} base_sync_version must be null`);
   } else if (!Number.isSafeInteger(base) || (base as number) < 0) {
     invalid(`${operation} base_sync_version must be a non-negative integer`);
-  }
-
-  if (table === "bookmarks" && normalizeBookmarkUrl(entityId) !== entityId) {
-    invalid("bookmark entity_id must already be a normalized url");
   }
 
   const data = validateOperationData(table, entityId, operation, raw.data);
