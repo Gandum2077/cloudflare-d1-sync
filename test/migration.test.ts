@@ -1,7 +1,7 @@
 import { applyD1Migrations } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { ENTITY_TABLES, SCHEMA_VERSION } from "../src/types";
+import { ENTITY_TABLES, SCHEMA_VERSION, entitySchemaVersion } from "../src/types";
 import { performCleanup } from "../src/cleanup";
 
 describe.sequential("migration and maintenance", () => {
@@ -48,7 +48,7 @@ describe.sequential("migration and maintenance", () => {
       "SELECT table_name, table_order, schema_version FROM sync_tables ORDER BY table_order",
     ).all();
     expect(registry.results).toEqual(ENTITY_TABLES.map((table, index) => ({
-      table_name: table, table_order: index + 1, schema_version: 1,
+      table_name: table, table_order: index + 1, schema_version: entitySchemaVersion(table),
     })));
     expect(await env.DB.prepare("SELECT schema_version FROM profile WHERE id = 1").first<number>("schema_version")).toBe(SCHEMA_VERSION);
     for (const excluded of ["bookmarks", "settings", "archive_taglist_v2", "archive_download_state_v2", "archive_records_v2", "config", "translation_data"])

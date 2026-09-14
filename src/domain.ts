@@ -53,6 +53,7 @@ export const DOMAIN_FIELDS: Record<EntityTable, Readonly<Record<string, FieldRul
   },
   marked_uploaders_v2: {},
   tag_access_count_v2: {
+    device_id: text(200, false, 1),
     namespace: { kind: "text", max: 512, default: "" },
     qualifier: { kind: "text", max: 512, default: "" },
     term: { kind: "text", max: 2048, default: "" },
@@ -69,7 +70,7 @@ export const REQUIRED_FIELDS: Partial<Record<EntityTable, readonly string[]>> = 
   search_bookmarks_v2: ["position_key"],
   ai_translation_services_v2: ["name", "script_text"],
   local_marked_tags_v2: ["namespace", "name"],
-  tag_access_count_v2: ["qualifier", "namespace", "term"],
+  tag_access_count_v2: ["device_id", "qualifier", "namespace", "term", "count"],
   favorite_images_v2: ["gid", "page_index", "favorited_at"],
 };
 

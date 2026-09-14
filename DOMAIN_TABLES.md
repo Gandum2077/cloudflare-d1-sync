@@ -167,11 +167,11 @@ CREATE TABLE global_reader_config_v2 (
 
 ## 7. `search_history_v2`
 
-搜索历史。`id` 是客户端现有的 `sorted_fsearch`，作为不透明、不可变字符串传输；服务端不重新规范化。`search_terms_json` 对应本地 `search_history_search_terms_v2`，数组下标就是 `term_index`，最多 100 项。每项只允许 `namespace`、`qualifier`、`term`、`dollar`、`subtract`、`tilde`，其中 `term` 必填且最长 2048 字节；`namespace`、`qualifier` 可省略或为 null，非 null 时最长 512 字节；三个标志可省略（本地按 0 处理），显式提供时只能为 0/1。客户端可写 `last_access_time`、`search_terms_json`；创建必须提供 `last_access_time`。
+搜索历史。`id` 是客户端现有的 `sorted_fsearch`，作为不透明、不可变字符串传输；服务端不重新规范化，允许空字符串但不允许 NULL。分页起点用 null 表示，不能把空 ID 当作起点或结束标记。`search_terms_json` 对应本地 `search_history_search_terms_v2`，数组下标就是 `term_index`，最多 100 项。每项只允许 `namespace`、`qualifier`、`term`、`dollar`、`subtract`、`tilde`，其中 `term` 必填且最长 2048 字节；`namespace`、`qualifier` 可省略或为 null，非 null 时最长 512 字节；三个标志可省略（本地按 0 处理），显式提供时只能为 0/1。客户端可写 `last_access_time`、`search_terms_json`；创建必须提供 `last_access_time`。
 
 ```sql
 CREATE TABLE search_history_v2 (
-  id                   TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 8192),
+  id                   TEXT PRIMARY KEY NOT NULL CHECK (length(id) BETWEEN 0 AND 8192),
   sync_version         INTEGER NOT NULL DEFAULT 0 CHECK (sync_version >= 0),
   deleted              INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
   server_updated_at    INTEGER NOT NULL,
@@ -196,7 +196,7 @@ ON search_history_v2(server_updated_at, id) WHERE deleted = 1;
 
 ```sql
 CREATE TABLE search_bookmarks_v2 (
-  id                   TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 8192),
+  id                   TEXT PRIMARY KEY NOT NULL CHECK (length(id) BETWEEN 0 AND 8192),
   sync_version         INTEGER NOT NULL DEFAULT 0 CHECK (sync_version >= 0),
   deleted              INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
   server_updated_at    INTEGER NOT NULL,
@@ -246,7 +246,7 @@ ON ai_translation_services_v2(server_updated_at, id) WHERE deleted = 1;
 
 WebDAV 服务的安全投影。`id` 是创建后不可变的内容 hash 或 UUID，服务端将其作为不透明字符串。客户端可写 `name`、`host`、`port`、`https`、`path`、`enabled`，创建时没有额外必填字段；`username` 和 `password` 不属于云端表字段，也不在字段白名单中。同一时刻最多一条未删除记录可有 `enabled = 1`。
 
-客户端应用云端记录时只合并上述安全字段，不得清空或覆盖本地表中的 `username`、`password`。新设备未配置本地凭据时，即使同步得到 `enabled = 1`，运行时也必须保持停用并提示用户补充凭据。
+客户端应用云端记录时只合并上述安全字段，不得清空或覆盖本机 `assets/credentials.json` 中的 `username`、`password`。新设备未配置本地凭据时，即使同步得到 `enabled = 1`，运行时也必须保持停用并提示用户补充凭据。
 
 ```sql
 CREATE TABLE webdav_services_v2 (
@@ -321,16 +321,21 @@ ON marked_uploaders_v2(server_updated_at, id) WHERE deleted = 1;
 
 ## 13. `tag_access_count_v2`
 
-标签访问次数。`qualifier`、`namespace`、`term` 都禁止包含冒号，服务端不限制具体选项；`id` 固定为 `<qualifier>:<namespace>:<term>`，Worker 必须重算并校验。客户端可写四个业务字段，创建必须提供 `qualifier`、`namespace`、`term`。`count` 是绝对值，更新必须走 OCC；禁止用 upsert 静默覆盖并发增量。
+每台设备各自累计同一搜索词的访问次数，云端保存分量，客户端按 `qualifier`、`namespace`、`term` 求和展示。`id` 为 `<device_id>:<qualifier>:<namespace>:<term>`；四个组成部分禁止包含冒号，`device_id` 必须等于请求的 `X-Device-ID`。设备只能写自己的分量，所有设备均可下载其他设备的分量。
+
+create、update、upsert 均须提供 `device_id`、`qualifier`、`namespace`、`term`、`count`，其中 update 仍检查 `base_sync_version`；建议用 upsert 上传本机累计值。更新在 SQL 中取 `MAX(云端现值, 提交值)`，重复或乱序上传不重复累加、不减少已有次数。`sync_version` 仍由服务端维护。禁止 delete、清零或改写其他设备的分量；设备解绑保留历史贡献。
+
+本机使用持久设备标识，只递增自己的行，只上传自己的累计值，不能上传汇总值。下载合并也取较大值，自己的云端回声不能覆盖尚未上传的访问次数。完整同步替换其他设备缓存时保留本机分量；设备标识不参与业务同步，也不能复制到另一设备使用。
 
 ```sql
 CREATE TABLE tag_access_count_v2 (
-  id                   TEXT PRIMARY KEY CHECK (length(id) BETWEEN 2 AND 3074),
+  id                   TEXT PRIMARY KEY NOT NULL CHECK (length(id) BETWEEN 4 AND 3275),
   sync_version         INTEGER NOT NULL DEFAULT 0 CHECK (sync_version >= 0),
-  deleted              INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
+  deleted              INTEGER NOT NULL DEFAULT 0 CHECK (deleted = 0),
   server_updated_at    INTEGER NOT NULL,
   created_by_device_id TEXT,
   updated_by_device_id TEXT,
+  device_id            TEXT NOT NULL CHECK (length(device_id) BETWEEN 1 AND 200 AND instr(device_id, ':') = 0),
   namespace            TEXT NOT NULL DEFAULT ''
     CHECK (length(namespace) <= 512 AND instr(namespace, ':') = 0),
   qualifier            TEXT NOT NULL DEFAULT ''
@@ -339,11 +344,8 @@ CREATE TABLE tag_access_count_v2 (
     CHECK (length(term) <= 2048 AND instr(term, ':') = 0),
   count                INTEGER NOT NULL DEFAULT 0
     CHECK (count BETWEEN 0 AND 9007199254740991),
-  CHECK (id = qualifier || ':' || namespace || ':' || term)
+  CHECK (id = device_id || ':' || qualifier || ':' || namespace || ':' || term)
 );
-
-CREATE INDEX idx_tag_access_count_v2_tombstones
-ON tag_access_count_v2(server_updated_at, id) WHERE deleted = 1;
 ```
 
 ## 14. `favorite_images_v2`
@@ -374,7 +376,7 @@ ON favorite_images_v2(server_updated_at, id) WHERE deleted = 1;
 
 # 业务表注册
 
-`0002_domain_tables.sql` 将数据库结构版本升为 2，清除研发阶段的示例表及其同步历史，保留已绑定设备。各业务表版本从 1 开始。迁移在创建上述表后注册 14 张同步实体表。顺序保证阅读记录先于其状态表；`sync_tables` 仍只用于发现和分页排序，不能作为动态 SQL 注入来源。
+`0002_domain_tables.sql` 创建业务表；`0003_device_counters.sql` 升到结构版本 3，保留其他业务数据和设备，清空无设备归属的试验计数、变更历史和幂等记录，客户端重新完整同步。计数及两张搜索表的表版本为 2，其余表版本仍为 1。全局高水位保留，不重置 `sqlite_sequence`。共注册 14 张同步实体表。顺序保证阅读记录先于其状态表；`sync_tables` 仍只用于发现和分页排序，不能作为动态 SQL 注入来源。
 
 ```sql
 INSERT INTO sync_tables(table_name, table_order, schema_version)
@@ -385,12 +387,12 @@ VALUES
   ('archive_rate_state_v2', 4, 1),
   ('gallery_reader_config_v2', 5, 1),
   ('global_reader_config_v2', 6, 1),
-  ('search_history_v2', 7, 1),
-  ('search_bookmarks_v2', 8, 1),
+  ('search_history_v2', 7, 2),
+  ('search_bookmarks_v2', 8, 2),
   ('ai_translation_services_v2', 9, 1),
   ('webdav_services_v2', 10, 1),
   ('local_marked_tags_v2', 11, 1),
   ('marked_uploaders_v2', 12, 1),
-  ('tag_access_count_v2', 13, 1),
+  ('tag_access_count_v2', 13, 2),
   ('favorite_images_v2', 14, 1);
 ```

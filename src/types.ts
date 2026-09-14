@@ -1,5 +1,5 @@
 export const API_VERSION = 1;
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 export const MAX_REQUEST_BYTES = 128 * 1024;
 export const MAX_OPERATIONS = 8;
 export const MAX_SYNC_LIMIT = 200;
@@ -105,6 +105,9 @@ export const ENTITY_TABLES = [
   "favorite_images_v2",
 ] as const;
 export type EntityTable = (typeof ENTITY_TABLES)[number];
+export function entitySchemaVersion(table: EntityTable): number {
+  return table === "tag_access_count_v2" || table === "search_history_v2" || table === "search_bookmarks_v2" ? 2 : 1;
+}
 export type OperationKind = "create" | "update" | "upsert" | "delete";
 
 export interface SyncOperation {

@@ -4,7 +4,7 @@
 
 业务表定义见 [DOMAIN_TABLES.md](./DOMAIN_TABLES.md)，客户端原始结构见 [db.sql](./db.sql)。Worker 同步 14 张业务实体表；本地附属表折叠到父实体的 JSON 字段，本地专用表和 WebDAV 凭据不上传。
 
-当前数据库结构版本为 2。`0002_domain_tables.sql` 会删除研发阶段的 `bookmarks/settings` 示例数据及旧同步历史，保留已绑定设备；已有客户端需丢弃旧游标和待重试的示例批次，重新完整同步。
+当前数据库结构版本为 3。`0003_device_counters.sql` 保留业务数据与设备绑定，清空无设备归属的试验计数及旧同步历史、幂等记录；已有客户端需重新完整同步。标签次数改为各设备分别累计、按词求和，详见 [计数规则](./DOMAIN_TABLES.md#13-tag_access_count_v2)。
 
 ## 特性
 

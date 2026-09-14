@@ -34,6 +34,7 @@ export async function bindDevice(request: Request, db: D1Database, now = Date.no
   const raw = assertObject(await readJsonBody(request));
   assertOnlyKeys(raw, ["device_id", "name", "platform", "app_version"]);
   const deviceId = requiredString(raw.device_id, "device_id", 1, 200);
+  if (deviceId.includes(":")) throw new ApiError(400, "INVALID_REQUEST", "device_id must not contain a colon");
   const name = requiredString(raw.name, "name", 1, 200);
   const platform = optionalString(raw.platform, "platform", 100) ?? null;
   const appVersion = optionalString(raw.app_version, "app_version", 100) ?? null;
@@ -51,10 +52,11 @@ export async function bindDevice(request: Request, db: D1Database, now = Date.no
   } catch (error) {
     if (error instanceof ApiError) throw error;
     const existing = await db.prepare(SQL.deviceGet).bind(deviceId).first<DeviceRow>();
-    if (existing !== null) {
-      throw new ApiError(503, "DATABASE_UNAVAILABLE", "device binding transaction failed; retry");
+    const activeCount = await db.prepare("SELECT COUNT(*) AS count FROM devices WHERE deleted = 0").first<number>("count");
+    if (existing?.deleted !== 0 && activeCount !== null && activeCount >= MAX_DEVICES) {
+      throw new ApiError(429, "RATE_LIMITED", `at most ${MAX_DEVICES} active devices may be bound`);
     }
-    throw new ApiError(429, "RATE_LIMITED", `at most ${MAX_DEVICES} active devices may be bound`);
+    throw new ApiError(503, "DATABASE_UNAVAILABLE", "device binding transaction failed; retry");
   }
 }
 

@@ -55,7 +55,7 @@ describe("domain validation", () => {
 
   it("allows arbitrary colon-free components and preserves opaque search IDs", () => {
     expect(parse("local_marked_tags_v2", "custom:标签", { namespace: "custom", name: "标签" })?.entity_id).toBe("custom:标签");
-    expect(parse("tag_access_count_v2", "custom:ns:term", { qualifier: "custom", namespace: "ns", term: "term" })).toBeTruthy();
+    expect(parse("tag_access_count_v2", "device:custom:ns:term", { device_id: "device", qualifier: "custom", namespace: "ns", term: "term", count: 1 })).toBeTruthy();
     expect(parse("search_history_v2", '  a:b "c"  ', { last_access_time: "now" })?.entity_id).toBe('  a:b "c"  ');
   });
 

@@ -19,7 +19,7 @@ const fixtures: { table: EntityTable; id: string; data: JsonObject }[] = [
   { table: "webdav_services_v2", id: "dav", data: { name: "DAV", host: "example.com", port: 443, https: 1, path: "/files", enabled: 1 } },
   { table: "local_marked_tags_v2", id: "custom:name", data: { namespace: "custom", name: "name", watched: 1, hidden: null, weight: -5 } },
   { table: "marked_uploaders_v2", id: "uploader", data: {} },
-  { table: "tag_access_count_v2", id: "q:ns:t", data: { qualifier: "q", namespace: "ns", term: "t", count: 2 } },
+  { table: "tag_access_count_v2", id: "domain-source:q:ns:t", data: { device_id: "domain-source", qualifier: "q", namespace: "ns", term: "t", count: 2 } },
   { table: "favorite_images_v2", id: "123:0", data: { gid: 123, page_index: 0, favorited_at: "now" } },
 ];
 
@@ -128,8 +128,8 @@ describe.sequential("real business entities", () => {
   });
 
   it("rejects stale counter updates and rolls back SQL-level uniqueness failures atomically", async () => {
-    await apply([op("tag_access_count_v2", "q:ns:t", { count: 3 }, "update", 1)]);
-    const stale = await sync([op("marked_uploaders_v2", "should-not-exist", {}), op("tag_access_count_v2", "q:ns:t", { count: 4 }, "update", 1)]);
+    await apply([op("tag_access_count_v2", "domain-source:q:ns:t", { device_id: "domain-source", qualifier: "q", namespace: "ns", term: "t", count: 3 }, "update", 1)]);
+    const stale = await sync([op("marked_uploaders_v2", "should-not-exist", {}), op("tag_access_count_v2", "domain-source:q:ns:t", { device_id: "domain-source", qualifier: "q", namespace: "ns", term: "t", count: 4 }, "update", 1)]);
     expect(stale.status).toBe(409);
     expect(await env.DB.prepare("SELECT id FROM marked_uploaders_v2 WHERE id = 'should-not-exist'").first()).toBeNull();
     await expect(env.DB.batch([
@@ -154,7 +154,7 @@ describe.sequential("real business entities", () => {
   it("tombstones every deletable table and cleans them without removing the global singleton", async () => {
     const deletions: Op[] = [];
     for (const table of [...ENTITY_TABLES].reverse()) {
-      if (table === "global_reader_config_v2") continue;
+      if (table === "global_reader_config_v2" || table === "tag_access_count_v2") continue;
       const rows = await env.DB.prepare(`SELECT id, sync_version FROM ${table} WHERE deleted = 0`).all<{ id: string; sync_version: number }>();
       deletions.push(...rows.results.map((row) => op(table, row.id, {}, "delete", row.sync_version)));
     }
@@ -163,11 +163,11 @@ describe.sequential("real business entities", () => {
     const page = await post("/v1/full-sync/data", { session_id: started.session_id, cursor: null, limit: 500 });
     const rows = page.rows as { table: string; entity: JsonObject }[];
     for (const table of ENTITY_TABLES) {
-      expect(rows.some((row) => row.table === table && row.entity.deleted === (table === "global_reader_config_v2" ? 0 : 1))).toBe(true);
+      expect(rows.some((row) => row.table === table && row.entity.deleted === (table === "global_reader_config_v2" || table === "tag_access_count_v2" ? 0 : 1))).toBe(true);
     }
     await performCleanup(env.DB, Date.now() + 366 * 24 * 60 * 60 * 1000);
     for (const table of ENTITY_TABLES) {
-      expect(await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first<number>("count")).toBe(table === "global_reader_config_v2" ? 1 : 0);
+      expect(await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first<number>("count")).toBe(table === "global_reader_config_v2" || table === "tag_access_count_v2" ? 1 : 0);
     }
   });
 

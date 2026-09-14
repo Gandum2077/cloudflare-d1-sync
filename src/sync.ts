@@ -130,6 +130,12 @@ async function preflightOperations(
   deviceId: string,
   operations: SyncOperation[],
 ): Promise<PreflightEntry[]> {
+  for (const operation of operations) {
+    if (operation.table === "tag_access_count_v2" &&
+      (operation.data?.device_id !== deviceId || operation.entity_id.split(":")[0] !== deviceId)) {
+      throw new ApiError(400, "INVALID_REQUEST", "a device may only write its own counters");
+    }
+  }
   const operationHashes = await Promise.all(
     operations.map((operation) => sha256Hex(canonicalJson(operationHashInput(deviceId, operation)))),
   );

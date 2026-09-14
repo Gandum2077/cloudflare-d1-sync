@@ -37,6 +37,10 @@ export function resolveRoute(method: string, pathname: string): ResolvedRoute | 
   return null;
 }
 
+// The retained-history floor preserves the watermark even when cleanup removes every change.
+const changeHighwater = `SELECT MAX(min_valid_change_seq,
+  COALESCE((SELECT MAX(change_seq) FROM changes), 0)) FROM profile WHERE id = 1`;
+
 const commonColumns = ["id", "sync_version", "deleted", "server_updated_at", "created_by_device_id", "updated_by_device_id"];
 
 function entityJson(table: EntityTable, alias = "e"): string {
@@ -77,7 +81,7 @@ function entityStatements(table: EntityTable) {
   };
   const parent = table === "favorite_images_v2" ? "substr(i.entity_id, 1, instr(i.entity_id, ':') - 1)"
     : ARCHIVE_STATE_TABLES.some((name) => name === table) ? "i.entity_id" : null;
-  const parentGuard = parent === null ? "1" : `EXISTS (
+  const writeGuard = table === "tag_access_count_v2" ? "json_extract(i.data, '$.device_id') = i.device_id" : parent === null ? "1" : `EXISTS (
     SELECT 1 FROM archive_entries_v2 parent WHERE parent.id = ${parent} AND parent.deleted = 0
   )`;
   const columns = [...commonColumns, ...fields.map(([column]) => column)].join(", ");
@@ -87,28 +91,30 @@ function entityStatements(table: EntityTable) {
       ? `CASE WHEN e.id IS NOT NULL THEN e.${column} ELSE ${fallback(rule)} END`
       : fallback(rule)} END`),
   ].join(", ");
+  const mergeValue = (column: string, incoming: string) =>
+    table === "tag_access_count_v2" && column === "count" ? `MAX(${table}.count, ${incoming})` : incoming;
   return {
     fullDataPage: `WITH candidates AS (
         SELECT ${ENTITY_TABLES.indexOf(table) + 1} AS table_order, '${table}' AS table_name,
           e.id AS entity_id, ${entityJson(table)} AS entity_json
-        FROM ${table} e WHERE e.id > ?1 ORDER BY e.id LIMIT ?2
+        FROM ${table} e WHERE e.id >= COALESCE(?1, '') AND (?1 IS NULL OR e.id > ?1) ORDER BY e.id LIMIT ?2
       ), sized AS (
         SELECT *, length(CAST(entity_json AS BLOB)) + 128 AS entity_bytes FROM candidates
       ), budgeted AS (
         SELECT *, SUM(entity_bytes) OVER (ORDER BY entity_id) AS page_bytes FROM sized
       ) SELECT * FROM budgeted WHERE page_bytes - entity_bytes <= ?3 ORDER BY entity_id`,
     create: `${input} INSERT INTO ${table} (${columns})
-      SELECT ${insertValues(false)} FROM input i WHERE ${parentGuard}`,
+      SELECT ${insertValues(false)} FROM input i WHERE ${writeGuard}`,
     update: `${input} UPDATE ${table} SET
       sync_version = sync_version + 1, server_updated_at = i.now, updated_by_device_id = i.device_id
-      ${fields.map(([column]) => `, ${column} = CASE WHEN ${has(column)} THEN ${extract(column)} ELSE ${column} END`).join("\n")}
-      FROM input i WHERE id = i.entity_id AND sync_version = ? AND deleted = 0 AND ${parentGuard}`,
+      ${fields.map(([column]) => `, ${column} = CASE WHEN ${has(column)} THEN ${mergeValue(column, extract(column))} ELSE ${table}.${column} END`).join("\n")}
+      FROM input i WHERE id = i.entity_id AND sync_version = ? AND deleted = 0 AND ${writeGuard}`,
     upsert: `${input} INSERT INTO ${table} (${columns})
-      SELECT ${insertValues(true)} FROM input i LEFT JOIN ${table} e ON e.id = i.entity_id WHERE ${parentGuard}
+      SELECT ${insertValues(true)} FROM input i LEFT JOIN ${table} e ON e.id = i.entity_id WHERE ${writeGuard}
       ON CONFLICT(id) DO UPDATE SET
         sync_version = ${table}.sync_version + 1, deleted = 0,
         server_updated_at = excluded.server_updated_at, updated_by_device_id = excluded.updated_by_device_id
-        ${fields.map(([column]) => `, ${column} = excluded.${column}`).join("\n")}`,
+        ${fields.map(([column]) => `, ${column} = ${mergeValue(column, `excluded.${column}`)}`).join("\n")}`,
     delete: `${input} UPDATE ${table} SET sync_version = sync_version + 1, deleted = 1,
       server_updated_at = i.now, updated_by_device_id = i.device_id
       FROM input i WHERE id = i.entity_id AND sync_version = ? AND deleted = 0
@@ -142,7 +148,7 @@ export const SQL = {
   entities: entitySql,
   profileInfo: `
     SELECT p.schema_version, p.api_version, p.min_valid_change_seq,
-           COALESCE((SELECT MAX(change_seq) FROM changes), 0) AS current_change_seq
+           (${changeHighwater}) AS current_change_seq
     FROM profile p WHERE p.id = 1`,
   syncTables: `
     SELECT table_name, table_order, schema_version
@@ -153,7 +159,7 @@ export const SQL = {
   deviceTouch: `UPDATE devices SET last_seen_at = ? WHERE id = ? AND deleted = 0`,
   deviceCapacityAssert: `
     INSERT INTO tx_assertions(value)
-    SELECT CASE WHEN EXISTS(SELECT 1 FROM devices WHERE id = ?)
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM devices WHERE id = ? AND deleted = 0)
       OR (SELECT COUNT(*) FROM devices WHERE deleted = 0) < ? THEN 1 ELSE 0 END`,
   deviceBind: `
     INSERT INTO devices(id, deleted, name, platform, app_version, last_seen_at, last_ack_change_seq, full_sync_session_id)
@@ -230,7 +236,7 @@ export const SQL = {
   // against the same primary snapshot.
   pullChanges: `
     WITH watermark AS (
-      SELECT COALESCE(MAX(change_seq), 0) AS highwater FROM changes
+      SELECT (${changeHighwater}) AS highwater
     ), candidates AS (
       SELECT c.change_seq, c.entity_table, c.operation,
         COALESCE(c.payload_json,
@@ -275,9 +281,9 @@ export const SQL = {
     INSERT INTO full_sync_sessions(
       id, device_id, start_request_id, baseline_seq, target_seq,
       schema_version, phase, expires_at, created_at, completed_at
-    ) SELECT ?, ?, ?, COALESCE(MAX(c.change_seq), 0), NULL,
+    ) SELECT ?, ?, ?, (${changeHighwater}), NULL,
       p.schema_version, 'downloading', ?, ?, NULL
-    FROM profile p LEFT JOIN changes c ON 1 = 1 WHERE p.id = 1`,
+    FROM profile p WHERE p.id = 1`,
   fullSetDevicePointer: `
     UPDATE devices SET full_sync_session_id = ? WHERE id = ? AND deleted = 0`,
   fullRenew: `
@@ -285,7 +291,7 @@ export const SQL = {
     WHERE id = ? AND phase IN ('downloading', 'catching_up')`,
   fullSeal: `
     UPDATE full_sync_sessions SET
-      target_seq = COALESCE((SELECT MAX(change_seq) FROM changes), 0),
+      target_seq = (${changeHighwater}),
       phase = 'catching_up'
     WHERE id = ? AND device_id = ? AND phase = 'downloading'`,
   fullChanges: `
@@ -337,7 +343,7 @@ export const SQL = {
     WHERE phase IN ('completed', 'expired') AND COALESCE(completed_at, expires_at) < ?`,
   cleanupRateLimits: `DELETE FROM rate_limits WHERE window_start < ?`,
   cleanupFloorPlan: `
-    SELECT (SELECT COALESCE(MAX(change_seq), 0) FROM changes) AS current_change_seq,
+    SELECT (${changeHighwater}) AS current_change_seq,
       p.min_valid_change_seq,
       (SELECT COUNT(*) FROM changes) AS change_count,
       (SELECT MAX(c.change_seq) FROM changes c

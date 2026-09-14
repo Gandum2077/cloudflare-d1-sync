@@ -30,7 +30,7 @@ interface FullCursor {
   session: string;
   schema: number;
   table_order: number;
-  last_id: string;
+  last_id: string | null;
   terminal: boolean;
 }
 
@@ -111,7 +111,7 @@ async function decodeCursor(value: string): Promise<FullCursor> {
     !Number.isSafeInteger(parsed.schema) ||
     typeof parsed.table_order !== "number" ||
     !Number.isSafeInteger(parsed.table_order) ||
-    typeof parsed.last_id !== "string" ||
+    (parsed.last_id !== null && typeof parsed.last_id !== "string") ||
     typeof parsed.terminal !== "boolean"
   ) {
     throw new ApiError(400, "INVALID_CURSOR", "cursor is malformed");
@@ -250,7 +250,7 @@ export async function readFullSyncData(
   const position =
     typeof raw.cursor === "string"
       ? await decodeCursor(raw.cursor)
-      : { v: 1, session: sessionId, schema: session.schema_version, table_order: 1, last_id: "", terminal: false };
+      : { v: 1, session: sessionId, schema: session.schema_version, table_order: 1, last_id: null, terminal: false };
   if (
     position.session !== sessionId ||
     position.schema !== session.schema_version ||
@@ -268,7 +268,7 @@ export async function readFullSyncData(
   for (const [index, table] of ENTITY_TABLES.entries()) {
     if (index + 1 < position.table_order) continue;
     const page = await db.prepare(SQL.entities[table].fullDataPage).bind(
-      index + 1 === position.table_order ? position.last_id : "",
+      index + 1 === position.table_order ? position.last_id : null,
       limit + 1 - allRows.length,
       MAX_PAGE_BYTES - bytes,
     ).all<FullDataRow>();

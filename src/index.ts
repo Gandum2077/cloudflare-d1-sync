@@ -24,7 +24,7 @@ import {
 } from "./full-sync";
 import { resolveRoute, SQL } from "./service";
 import { executeSync } from "./sync";
-import { API_VERSION, ApiError, ENTITY_TABLES, SCHEMA_VERSION, type DeviceRow, type JsonObject } from "./types";
+import { API_VERSION, ApiError, ENTITY_TABLES, entitySchemaVersion, SCHEMA_VERSION, type DeviceRow, type JsonObject } from "./types";
 import { parseSyncRequest, readJsonBody } from "./validation";
 
 function clientSubject(request: Request): string {
@@ -47,14 +47,14 @@ async function info(db: D1Database): Promise<Response> {
     profile.schema_version !== SCHEMA_VERSION ||
     profile.api_version !== API_VERSION ||
     tables.results.length !== expected.length ||
-    tables.results.some((table, index) => table.table_name !== expected[index] || table.schema_version !== 1 || table.table_order !== index + 1)
+    tables.results.some((table, index) => table.table_name !== expected[index] || table.schema_version !== entitySchemaVersion(expected[index]) || table.table_order !== index + 1)
   ) {
     throw new ApiError(500, "INTERNAL_ERROR", "database schema does not match this Worker version");
   }
   return jsonSuccess({
     ...profile,
     sync_tables: expected,
-    capabilities: ["batch_atomic", "full_sync", "upsert"],
+    capabilities: ["batch_atomic", "full_sync", "upsert", "device_counters"],
   });
 }
 

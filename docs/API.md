@@ -38,7 +38,7 @@ X-API-Version: 1
 ### `GET /v1/info`
 
 ```json
-{"ok":true,"data":{"schema_version":2,"api_version":1,"min_valid_change_seq":0,"current_change_seq":128,"sync_tables":["archive_entries_v2","archive_read_state_v2","archive_favorite_state_v2","archive_rate_state_v2","gallery_reader_config_v2","global_reader_config_v2","search_history_v2","search_bookmarks_v2","ai_translation_services_v2","webdav_services_v2","local_marked_tags_v2","marked_uploaders_v2","tag_access_count_v2","favorite_images_v2"],"capabilities":["batch_atomic","full_sync","upsert"]}}
+{"ok":true,"data":{"schema_version":3,"api_version":1,"min_valid_change_seq":0,"current_change_seq":128,"sync_tables":["archive_entries_v2","archive_read_state_v2","archive_favorite_state_v2","archive_rate_state_v2","gallery_reader_config_v2","global_reader_config_v2","search_history_v2","search_bookmarks_v2","ai_translation_services_v2","webdav_services_v2","local_marked_tags_v2","marked_uploaders_v2","tag_access_count_v2","favorite_images_v2"],"capabilities":["batch_atomic","full_sync","upsert","device_counters"]}}
 ```
 
 ## 设备
@@ -141,7 +141,7 @@ X-API-Version: 1
 ```
 
 ```json
-{"ok":true,"data":{"session_id":"session-uuid","phase":"downloading","baseline_seq":128,"schema_version":2,"expires_at":1786500900000}}
+{"ok":true,"data":{"session_id":"session-uuid","phase":"downloading","baseline_seq":128,"schema_version":3,"expires_at":1786500900000}}
 ```
 
 同一 `request_id` 或同设备已有有效会话时返回同一会话。
@@ -199,7 +199,7 @@ complete 可幂等重试。会话默认租期 15 分钟、最长 2 小时；已 
 14 张同步实体及其字段、主键和约束以 [DOMAIN_TABLES.md](../DOMAIN_TABLES.md) 为准。`db.sql` 描述客户端本地结构，不能直接作为 D1 迁移执行。
 
 - `global_reader_config_v2` 固定 ID 为 `1`，仅允许 upsert/update。
-- `tag_access_count_v2` 使用绝对计数，禁止 upsert，更新必须带 OCC 版本。
+- `tag_access_count_v2` 按 `device_id:qualifier:namespace:term` 保存本机累计值；只能写自己的分量，推荐 upsert，云端取 MAX，客户端按词求和，禁止 delete。create/update/upsert 均须提供 device_id、qualifier、namespace、term、count；update 仍需 OCC 版本。
 - 父阅读记录必须先存在；删除父记录前，先逐一提交子记录的墓碑。批次按 operations 顺序处理依赖和单选切换。
 - JSON 附属字段使用字符串传输，服务端校验后规范化；WebDAV 的 `username/password` 一律拒绝。
 

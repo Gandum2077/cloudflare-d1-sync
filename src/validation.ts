@@ -222,17 +222,17 @@ function validateEntityId(table: EntityTable, value: unknown): string {
     archive_entries_v2: 32, archive_read_state_v2: 32, archive_favorite_state_v2: 32,
     archive_rate_state_v2: 32, gallery_reader_config_v2: 32, global_reader_config_v2: 1,
     search_history_v2: 8192, search_bookmarks_v2: 8192, local_marked_tags_v2: 1025,
-    marked_uploaders_v2: 512, tag_access_count_v2: 3074, favorite_images_v2: 64,
+    marked_uploaders_v2: 512, tag_access_count_v2: 3275, favorite_images_v2: 64,
   };
-  const id = boundedText(value, "operation.entity_id", 1, limits[table] ?? 200);
+  const id = boundedText(value, "operation.entity_id", table === "search_history_v2" || table === "search_bookmarks_v2" ? 0 : 1, limits[table] ?? 200);
   if ((table === "archive_entries_v2" || ARCHIVE_STATE_TABLES.some((name) => name === table)) && !/^[0-9]+$/u.test(id)) {
     invalid("archive entity_id must be a decimal gid string");
   }
   if (table === "global_reader_config_v2" && id !== "1") invalid("global reader config entity_id must be 1");
   if (table === "local_marked_tags_v2" || table === "tag_access_count_v2") {
     const parts = id.split(":");
-    if (parts.length !== (table === "local_marked_tags_v2" ? 2 : 3)) invalid("entity_id must use the documented composite key");
-    parts.forEach((part, index) => boundedText(part, "entity_id component", table === "local_marked_tags_v2" ? 1 : 0, index === 2 ? 2048 : 512));
+    if (parts.length !== (table === "local_marked_tags_v2" ? 2 : 4)) invalid("entity_id must use the documented composite key");
+    parts.forEach((part, index) => boundedText(part, "entity_id component", table === "local_marked_tags_v2" || index === 0 ? 1 : 0, table === "tag_access_count_v2" ? (index === 0 ? 200 : index === 3 ? 2048 : 512) : 512));
   }
   if (table === "favorite_images_v2") {
     const parts = id.split(":");
@@ -252,7 +252,13 @@ function validateOperationData(
   if (table === "global_reader_config_v2" && operation !== "upsert" && operation !== "update") {
     invalid("global reader config only supports upsert and update");
   }
-  if (table === "tag_access_count_v2" && operation === "upsert") invalid("tag access counts require OCC; upsert is not allowed");
+  if (table === "tag_access_count_v2") {
+    if (operation === "delete") invalid("device counters cannot be deleted or reset");
+    const counter = assertObject(dataValue, "operation.data");
+    for (const key of ["device_id", "qualifier", "namespace", "term", "count"]) {
+      if (!Object.hasOwn(counter, key)) invalid(`operation.data.${key} is required for a device counter`);
+    }
+  }
   if (operation === "delete") {
     if (dataValue !== undefined) invalid("delete operations must not include data");
     return undefined;
@@ -270,7 +276,7 @@ function validateOperationData(
     normalized[key] = validateField(value, rule, `operation.data.${key}`);
   }
   const keyFields = table === "local_marked_tags_v2" ? ["namespace", "name"]
-    : table === "tag_access_count_v2" ? ["qualifier", "namespace", "term"]
+    : table === "tag_access_count_v2" ? ["device_id", "qualifier", "namespace", "term"]
     : table === "favorite_images_v2" ? ["gid", "page_index"] : [];
   const parts = entityId.split(":");
   for (const [index, key] of keyFields.entries()) {

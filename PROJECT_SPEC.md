@@ -23,6 +23,7 @@
 - 客户端通过 `Authorization: Bearer <MASTER_KEY>` 调用 API，并应将密钥保存到操作系统安全凭据存储，例如 iOS Keychain、Android Keystore 或 macOS Keychain；不得写入普通业务数据库、日志、URL、错误报告或明文偏好设置。
 - Worker 比较密钥时，必须先将收到的值和 Secret 分别计算为固定长度的 SHA-256 摘要，再使用 `crypto.subtle.timingSafeEqual()` 比较；不得直接使用普通字符串比较。
 - 修改 Worker Secret 表示全局轮换密钥：旧密钥立即失效，所有设备都必须重新配置。Cloudflare 控制面板不能恢复或显示已保存 Secret 的原值，只能替换它。
+- 设备绑定 ID 禁止包含冒号，以便作为计数分量 ID 的前缀。
 - `X-Device-ID` 只是设备标识，不是第二重鉴权。任意设备泄露主密钥都会导致整个实例失守，解绑设备也不能撤销该设备已持有的主密钥；这是 v1 为保持部署和使用简单而接受的安全边界。
 
 ### 2.2 两类版本号，不依赖设备时间
@@ -34,9 +35,9 @@
 
 1. 普通 update/delete 提交 `base_sync_version`；服务端只在它等于当前版本时接受。
 2. create 提交 `base_sync_version: null`；只有云端从未存在该 ID 时才能创建。
-3. upsert 提交 `base_sync_version: null`：不存在时创建，存在时无条件更新，不检查当前版本。
+3. upsert 提交 `base_sync_version: null`：不存在时创建，存在时无条件更新，不检查当前版本；设备计数取 MAX，详见 DOMAIN_TABLES.md 第 13 节。
 4. 每次成功更新、删除或 upsert 都由服务端增加 `sync_version`。
-5. 普通操作版本不一致时返回 `409 CONFLICT` 和当前实体，不做静默覆盖；upsert 明确采用 D1 事务提交顺序的后提交者覆盖。
+5. 除 DOMAIN_TABLES.md 规定的设备计数 MAX 合并外，下文 upsert 的通用覆盖规则适用于其他实体。普通操作版本不一致时返回 `409 CONFLICT` 和当前实体，不做静默覆盖；upsert 明确采用 D1 事务提交顺序的后提交者覆盖。
 
 因此，数据表中的字段仍叫 `sync_version`，但上传参数必须叫 `base_sync_version`，避免混淆。
 
@@ -175,7 +176,7 @@ CREATE TABLE profile (
 
 - `schema_version`：D1 数据结构版本；由迁移维护。
 - `api_version`：Worker 当前协议主版本。
-- `min_valid_change_seq`：仍允许增量同步的最早游标。
+- `min_valid_change_seq`：仍允许增量同步的最早游标。当前高水位取此值与现存最大 `change_seq` 的较大者，清空历史后也不能回退到 0。
 
 ### 5.4 `changes`：只追加的变更流水
 
@@ -345,12 +346,12 @@ ON processed_batches(server_updated_at, device_id, batch_id);
 {
   "ok": true,
   "data": {
-    "schema_version": 2,
+    "schema_version": 3,
     "api_version": 1,
     "current_change_seq": 1288,
     "min_valid_change_seq": 0,
     "sync_tables": ["..."],
-    "capabilities": ["batch_atomic", "full_sync", "upsert"]
+    "capabilities": ["batch_atomic", "full_sync", "upsert", "device_counters"]
   }
 }
 ```
@@ -547,7 +548,7 @@ create、update、upsert 和 delete 共用请求 DTO；四种操作的 `data` �
     "session_id": "0198-session-1",
     "phase": "downloading",
     "baseline_seq": 1280,
-    "schema_version": 2,
+    "schema_version": 3,
     "expires_at": 1786500900000
   }
 }
@@ -579,7 +580,7 @@ create、update、upsert 和 delete 共用请求 DTO；四种操作的 `data` �
 }
 ```
 
-`data` 不接受表名，按 `sync_tables.table_order`、表内 `id ASC` 自动跨表分页，数据来自 primary 并包含墓碑。 实现按代码白名单逐表执行主键范围查询，避免超出 D1 复合查询项数限制；数据与变更分页均设约 1 MiB 页预算，客户端以 `has_more` 而非返回条数判断结束。cursor 是 `base64url(canonical JSON + SHA-256 checksum)` 的无状态 keyset 位置，包含版本、session、schema、表序号和最后 ID；客户端可信，checksum 只用于发现损坏和客户端 bug，不作为防伪安全边界。相同参数可重复请求同一页，重复行必须可安全覆盖暂存区。
+`data` 不接受表名，按 `sync_tables.table_order`、表内 `id ASC` 自动跨表分页（起点 `last_id = null`，空字符串是合法搜索 ID），数据来自 primary 并包含墓碑。 实现按代码白名单逐表执行主键范围查询，避免超出 D1 复合查询项数限制；数据与变更分页均设约 1 MiB 页预算，客户端以 `has_more` 而非返回条数判断结束。cursor 是 `base64url(canonical JSON + SHA-256 checksum)` 的无状态 keyset 位置，包含版本、session、schema、表序号和最后 ID；客户端可信，checksum 只用于发现损坏和客户端 bug，不作为防伪安全边界。相同参数可重复请求同一页，重复行必须可安全覆盖暂存区。
 
 `limit` 必须在 1–500；`data` 和 `changes` 每次最多返回 500 条结果。
 
