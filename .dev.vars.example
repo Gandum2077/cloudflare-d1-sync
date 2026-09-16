@@ -1,2 +1,2 @@
-# Generate a unique value in docs/index.html or with: openssl rand -hex 32
-MASTER_KEY=
+# Generate a local 256-bit key; never commit .dev.vars.
+MASTER_KEY=""

@@ -1,51 +1,48 @@
 {
   "name": "cloudflare-d1-sync",
-  "version": "1.0.0",
-  "description": "Single-user, offline-first structured data sync on Cloudflare Workers and D1",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
+  "license": "MIT",
   "scripts": {
+    "dev": "wrangler dev --local",
+    "types": "wrangler types --env-file .dev.vars.example --strict-vars false",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "build": "wrangler deploy --dry-run --outdir dist",
-    "check": "npm run types:check && npm run typecheck && npm run lint && npm test && npm run build",
+    "check": "npm run format:check && npm run typecheck && npm test && npm run build",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
     "deploy": "npm run db:migrate:remote && wrangler deploy",
-    "dev": "wrangler dev --local",
-    "lint": "eslint src test vitest.config.ts",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "types": "wrangler types --env-file .dev.vars.example --strict-vars false",
-    "types:check": "wrangler types --env-file .dev.vars.example --strict-vars false --check"
+    "format": "prettier --write src test vitest.config.ts",
+    "format:check": "prettier --check src test vitest.config.ts"
   },
-  "keywords": [
-    "cloudflare-workers",
-    "d1",
-    "offline-first",
-    "sync"
-  ],
-  "license": "MIT",
   "engines": {
     "node": ">=22"
   },
   "cloudflare": {
     "bindings": {
       "DB": {
-        "description": "D1 database that stores synchronized data and change history."
+        "description": "Private synchronized JSON data and recent changes."
       },
       "MASTER_KEY": {
-        "description": "Generate a 64-character lowercase hex key with 256 bits of entropy. The project guide can generate one locally in your browser."
+        "description": "64 lowercase hex characters generated locally in the guide. Store as a Secret."
       }
     }
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.21.3",
-    "@cloudflare/workers-types": "^5.20260818.1",
-    "@eslint/js": "^10.0.1",
-    "@types/node": "^26.2.0",
-    "eslint": "^10.8.1",
-    "typescript": "^6.0.2",
-    "typescript-eslint": "^8.67.0",
-    "vitest": "^4.1.10",
-    "wrangler": "^4.123.0"
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260916.1",
+    "@types/node": "^22.20.3",
+    "prettier": "^3.9.6",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.132.0"
+  },
+  "dependencies": {
+    "@streamparser/json": "^0.0.26"
+  },
+  "overrides": {
+    "sharp": "^0.35.4"
   }
 }

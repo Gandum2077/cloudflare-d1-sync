@@ -1,124 +1,92 @@
-import { SQL } from "./service";
-import { jsonSuccess } from "./auth";
-import { ApiError, MAX_DEVICES, type DeviceRow, type JsonObject } from "./types";
-import {
-  assertObject,
-  assertOnlyKeys,
-  optionalString,
-  readJsonBody,
-  requiredString,
-} from "./validation";
-
-function deviceJson(device: DeviceRow): JsonObject {
+import { boolean, fail, json, limit, object, string } from "./http";
+import { SQL, type Device } from "./sql";
+function publicDevice(d: Device) {
   return {
-    id: device.id,
-    deleted: device.deleted,
-    name: device.name,
-    platform: device.platform,
-    app_version: device.app_version,
-    last_seen_at: device.last_seen_at,
-    last_ack_change_seq: device.last_ack_change_seq,
-    full_sync_session_id: device.full_sync_session_id,
+    id: d.id,
+    name: d.name,
+    platform: d.platform,
+    last_seq: d.last_seq,
+    last_request_seq: d.last_request_seq,
+    created_at: d.created_at,
+    last_seen_at: d.last_seen_at,
+    disabled: !!d.disabled,
   };
 }
-
-export async function requireBoundDevice(db: D1Database, id: string): Promise<DeviceRow> {
-  const device = await db.prepare(SQL.deviceGet).bind(id).first<DeviceRow>();
-  if (device === null || device.deleted !== 0) {
-    throw new ApiError(403, "DEVICE_NOT_BOUND", "device is not bound");
-  }
-  return device;
-}
-
-export async function bindDevice(request: Request, db: D1Database, now = Date.now()): Promise<Response> {
-  const raw = assertObject(await readJsonBody(request));
-  assertOnlyKeys(raw, ["device_id", "name", "platform", "app_version"]);
-  const deviceId = requiredString(raw.device_id, "device_id", 1, 200);
-  if (deviceId.includes(":")) throw new ApiError(400, "INVALID_REQUEST", "device_id must not contain a colon");
-  const name = requiredString(raw.name, "name", 1, 200);
-  const platform = optionalString(raw.platform, "platform", 100) ?? null;
-  const appVersion = optionalString(raw.app_version, "app_version", 100) ?? null;
-
-  try {
-    const batch = await db.batch<DeviceRow>([
-      db.prepare(SQL.deviceCapacityAssert).bind(deviceId, MAX_DEVICES),
-      db.prepare(SQL.deviceBind).bind(deviceId, name, platform, appVersion, now),
-      db.prepare(SQL.assertionClear),
-      db.prepare(SQL.deviceGet).bind(deviceId),
-    ]);
-    const device = batch[3]?.results[0];
-    if (device === undefined) throw new ApiError(503, "DATABASE_UNAVAILABLE", "database is unavailable");
-    return jsonSuccess({ device: deviceJson(device) });
-  } catch (error) {
-    if (error instanceof ApiError) throw error;
-    const existing = await db.prepare(SQL.deviceGet).bind(deviceId).first<DeviceRow>();
-    const activeCount = await db.prepare("SELECT COUNT(*) AS count FROM devices WHERE deleted = 0").first<number>("count");
-    if (existing?.deleted !== 0 && activeCount !== null && activeCount >= MAX_DEVICES) {
-      throw new ApiError(429, "RATE_LIMITED", `at most ${MAX_DEVICES} active devices may be bound`);
-    }
-    throw new ApiError(503, "DATABASE_UNAVAILABLE", "device binding transaction failed; retry");
-  }
-}
-
-export async function listDevices(db: D1Database): Promise<Response> {
-  const result = await db.prepare(SQL.deviceList).all<DeviceRow>();
-  return jsonSuccess({ devices: result.results.map(deviceJson) });
-}
-
-export async function patchDevice(
-  request: Request,
-  db: D1Database,
-  targetId: string,
-  now = Date.now(),
-): Promise<Response> {
-  if (targetId.length < 1 || targetId.length > 200) {
-    throw new ApiError(400, "INVALID_REQUEST", "device id is invalid");
-  }
-  const raw = assertObject(await readJsonBody(request));
-  assertOnlyKeys(raw, ["name", "platform", "app_version"]);
-  if (Object.keys(raw).length === 0) {
-    throw new ApiError(400, "INVALID_REQUEST", "device patch must include at least one field");
-  }
-  const name = raw.name === undefined ? undefined : requiredString(raw.name, "name", 1, 200);
-  const platform = optionalString(raw.platform, "platform", 100);
-  const appVersion = optionalString(raw.app_version, "app_version", 100);
-  const existing = await db.prepare(SQL.deviceGet).bind(targetId).first<DeviceRow>();
-  if (existing === null) throw new ApiError(404, "ENTITY_NOT_FOUND", "device not found");
-  if (existing.deleted !== 0) throw new ApiError(409, "CONFLICT", "device is unbound");
-
-  await db
-    .prepare(SQL.devicePatch)
-    .bind(
-      name === undefined ? 0 : 1,
-      name ?? "",
-      platform === undefined ? 0 : 1,
-      platform ?? null,
-      appVersion === undefined ? 0 : 1,
-      appVersion ?? null,
-      now,
-      targetId,
-    )
-    .run();
-  const updated = await db.prepare(SQL.deviceGet).bind(targetId).first<DeviceRow>();
-  if (updated === null) throw new ApiError(503, "DATABASE_UNAVAILABLE", "database is unavailable");
-  return jsonSuccess({ device: deviceJson(updated) });
-}
-
-export async function deleteDevice(
-  db: D1Database,
-  targetId: string,
-  now = Date.now(),
-): Promise<Response> {
-  if (targetId.length < 1 || targetId.length > 200) {
-    throw new ApiError(400, "INVALID_REQUEST", "device id is invalid");
-  }
-  const existing = await db.prepare(SQL.deviceGet).bind(targetId).first<DeviceRow>();
-  if (existing === null) throw new ApiError(404, "ENTITY_NOT_FOUND", "device not found");
-  await db.batch([
-    db.prepare(SQL.deviceExpireSessions).bind(targetId),
-    db.prepare(SQL.deviceDelete).bind(now, targetId),
+export async function putDevice(
+  db: D1DatabaseSession,
+  id: string,
+  body: Record<string, unknown>,
+) {
+  object(body, ["name", "platform"]);
+  for (const key of ["name", "platform"])
+    if (body[key] !== undefined && body[key] !== null) string(body[key]);
+  const now = Date.now();
+  const result = await db.batch([
+    db
+      .prepare(
+        `INSERT INTO devices(id,name,platform,created_at,last_seen_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING RETURNING id`,
+      )
+      .bind(id, body.name ?? null, body.platform ?? null, now, now),
+    db
+      .prepare(
+        `UPDATE devices SET name=CASE WHEN ? THEN ? ELSE name END,platform=CASE WHEN ? THEN ? ELSE platform END WHERE id=? RETURNING ${SQL.deviceColumns}`,
+      )
+      .bind(
+        Number(Object.hasOwn(body, "name")),
+        body.name ?? null,
+        Number(Object.hasOwn(body, "platform")),
+        body.platform ?? null,
+        id,
+      ),
   ]);
-  const deleted = await db.prepare(SQL.deviceGet).bind(targetId).first<DeviceRow>();
-  if (deleted === null) throw new ApiError(503, "DATABASE_UNAVAILABLE", "database is unavailable");
-  return jsonSuccess({ device: deviceJson(deleted) });
+  return json(
+    { device: publicDevice(result[1].results[0] as Device) },
+    result[0].results.length ? 201 : 200,
+  );
+}
+export async function patchDevice(
+  db: D1DatabaseSession,
+  id: string,
+  body: Record<string, unknown>,
+) {
+  object(body, ["disabled"]);
+  const row = await db
+    .prepare(
+      `UPDATE devices SET disabled=? WHERE id=? RETURNING ${SQL.deviceColumns}`,
+    )
+    .bind(Number(boolean(body.disabled)), id)
+    .first<Device>();
+  if (!row) fail("DEVICE_NOT_FOUND", 404);
+  return json({ device: publicDevice(row) });
+}
+export async function listDevices(db: D1DatabaseSession, url: URL) {
+  const params = url.searchParams;
+  for (const key of params.keys())
+    if (!["limit", "after_id"].includes(key) || params.getAll(key).length !== 1)
+      fail();
+  const raw = params.get("limit");
+  if (raw !== null && !/^\d+$/.test(raw)) fail();
+  const size = limit(raw === null ? undefined : Number(raw)),
+    after = params.get("after_id");
+  const query =
+    after === null
+      ? `SELECT ${SQL.deviceColumns} FROM devices ORDER BY id LIMIT ?`
+      : `SELECT ${SQL.deviceColumns} FROM devices WHERE id>? ORDER BY id LIMIT ?`;
+  const page = await db
+    .prepare(query)
+    .bind(...(after === null ? [size] : [after, size]))
+    .all<Device>();
+  const last = page.results.at(-1)?.id;
+  const more =
+    last !== undefined
+      ? !!(await db
+          .prepare("SELECT id FROM devices WHERE id>? ORDER BY id LIMIT 1")
+          .bind(last)
+          .first())
+      : false;
+  return json({
+    devices: page.results.map(publicDevice),
+    next_after_id: more ? last : null,
+    has_more: more,
+  });
 }
