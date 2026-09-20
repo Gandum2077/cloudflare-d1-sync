@@ -1,5 +1,6 @@
 import {
   ApiError,
+  databaseError,
   boolean,
   fail,
   integer,
@@ -82,8 +83,20 @@ export function records(
           }
           if (groupEmitted) return;
         }
-      } catch {
-        controller.error(new Error("DATABASE_UNAVAILABLE"));
+      } catch (error) {
+        const failure = databaseError(error);
+        if (failure.status === 429 || failure.status === 507) {
+          // Headers may already be sent. Finish with an error, never a success cursor.
+          // Clients must reject the entire page even though HTTP status is 200.
+          controller.enqueue(
+            encoder.encode(
+              `],"error":${JSON.stringify({ code: failure.code, message: failure.code })}}`,
+            ),
+          );
+          controller.close();
+        } else {
+          controller.error(new Error("DATABASE_UNAVAILABLE"));
+        }
       }
     },
   });

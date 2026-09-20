@@ -73,3 +73,26 @@ it("resumes bounded GC checkpoints without scanning or storing a counter", async
     oldest: 5001,
   });
 });
+
+it("keeps a ten-record create batch within 41 written rows", async () => {
+  expect(
+    (await env.DB.prepare("PRAGMA index_list('changes')").all()).results,
+  ).toEqual([]);
+  await env.DB.prepare(
+    "INSERT INTO devices(id,created_at,last_seen_at) VALUES('a',0,0)",
+  ).run();
+  const statements = [];
+  for (let i = 0; i < 10; i++) {
+    statements.push(
+      env.DB.prepare(SQL.save).bind("t", String(i), "{}", 1, 0, 0, "a", "a"),
+    );
+    statements.push(
+      env.DB.prepare(SQL.change).bind("t", String(i), "create", "a", 0),
+    );
+  }
+  statements.push(env.DB.prepare(SQL.receipt).bind(1, "hash", "{}", 0, "a"));
+  const results = await env.DB.batch(statements);
+  expect(
+    results.reduce((sum, result) => sum + result.meta.rows_written, 0),
+  ).toBe(41);
+});

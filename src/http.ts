@@ -76,7 +76,41 @@ export async function authenticate(request: Request, env: Env): Promise<void> {
     fail("UNAUTHORIZED", 401);
 }
 export function databaseError(error: unknown): ApiError {
-  const message = error instanceof Error ? error.message : "";
+  // Older D1 bindings put the detailed error in cause. Never return raw SQL/errors.
+  const messages: string[] = [];
+  const seen = new Set<unknown>();
+  for (
+    let current = error;
+    current instanceof Error && !seen.has(current) && seen.size < 5;
+    current = current.cause
+  ) {
+    seen.add(current);
+    messages.push(current.message);
+  }
+  const message = messages.join("\n");
+  // Match documented quota errors, not generic CPU/time/memory/overload limits.
+  const daily = /exceeded D1['’]s free tier daily row (read|write) limit/i.exec(
+    message,
+  );
+  if (daily) {
+    const untilReset = Math.ceil((86400000 - (Date.now() % 86400000)) / 1000);
+    return new ApiError(
+      429,
+      daily[1].toLowerCase() === "read"
+        ? "D1_READ_QUOTA_EXCEEDED"
+        : "D1_WRITE_QUOTA_EXCEEDED",
+      undefined,
+      { "Retry-After": String(untilReset) },
+    );
+  }
+  if (/exceeded D1['’]s maximum account storage limit/i.test(message))
+    return new ApiError(507, "D1_STORAGE_QUOTA_EXCEEDED");
+  if (
+    /exceeded maximum DB size|SQLITE_FULL|database or disk is full/i.test(
+      message,
+    )
+  )
+    return new ApiError(507, "D1_DATABASE_SIZE_EXCEEDED");
   if (
     /too (?:big|large)|SQLITE_TOOBIG|string or blob too big|row.*size/i.test(
       message,

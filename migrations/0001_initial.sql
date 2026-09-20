@@ -17,8 +17,6 @@ CREATE TABLE changes (
   device_id TEXT NOT NULL,
   server_updated_at INTEGER NOT NULL
 );
-CREATE INDEX idx_changes_data ON changes(tablename, id);
-CREATE INDEX idx_changes_device ON changes(device_id);
 CREATE TABLE devices (
   id TEXT PRIMARY KEY NOT NULL,
   name TEXT,

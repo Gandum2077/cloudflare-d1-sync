@@ -508,8 +508,16 @@ data 为 Record 数组，按 `(tablename, id)` 的 BINARY 主键顺序排列，�
 | 413 | PAYLOAD_TOO_LARGE | Worker 可识别的请求/存储平台大小限制；不截断数据 |
 | 415 | UNSUPPORTED_MEDIA_TYPE | 请求体不是 application/json |
 | 429 | RATE_LIMITED | 请求过于频繁；如有 Retry-After 则遵循 |
+| 429 | D1_READ_QUOTA_EXCEEDED | D1 每日读取额度已用完；停止自动重试，UTC 00:00 重置或升级套餐 |
+| 429 | D1_WRITE_QUOTA_EXCEEDED | D1 每日写入额度已用完；停止自动重试，UTC 00:00 重置或升级套餐 |
+| 507 | D1_STORAGE_QUOTA_EXCEEDED | D1 账户存储额度已用完；释放空间或调整账户额度，不按日重置 |
+| 507 | D1_DATABASE_SIZE_EXCEEDED | 单个数据库容量已满；释放空间或拆分数据，不按日重置 |
 | 500 | INTERNAL_ERROR | 未分类错误；写入结果不确定时原样重试 |
 | 503 | DATABASE_UNAVAILABLE | 数据库暂不可用；退避并原样重试写请求 |
+
+额度分类依据 [Cloudflare 官方 D1 错误文本](https://developers.cloudflare.com/d1/observability/debug-d1/)，兼容 `Error.cause`。每日额度错误附带到下次 UTC 00:00 的 `Retry-After` 秒数；不能将未知 DATABASE_UNAVAILABLE、CPU/内存/超时错误猜测为额度不足。
+
+**流式下载错误**：`/v1/sync`、`/v1/full-download` 可能已发送 HTTP 200 后才遇到额度限制，此时 JSON 以顶层 `error: {code,message}` 结束，并省略成功游标与 `has_more`。客户端必须先检查顶层 error，再处理任何 data/changes；整页失败，不提交已返回的数据或推进游标。未知流式故障仍中断响应。额度恢复后重试应保留原游标及原样未确认写请求。
 
 鉴权优先于设备状态与写结果重放。请求结构校验通过后才处理幂等编号。批量同键重复使用 INVALID_REQUEST，不写任何记录。
 

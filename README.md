@@ -33,7 +33,7 @@ npm run check
 
 ## 部署
 
-本次重建使用全新的 D1 数据库，不支持将旧业务表数据库原地升级。新迁移不包含旧数据转换，也不会自动清空已有数据库。
+项目仍处于开发阶段，未发布给用户；最终表结构直接维护在 `migrations/0001_initial.sql`，不保留旧开发版本的兼容升级迁移。部署使用新建数据库，已有开发数据库不会因修改初始迁移而自动更新。
 
 GitHub Pages 的 Deploy to Cloudflare 流程可预配 DB，并要求输入 MASTER_KEY Secret。构建部署命令使用 `npm run deploy`，先按 DB binding 应用迁移，再部署 Worker。
 
