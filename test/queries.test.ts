@@ -22,6 +22,11 @@ it("keeps runtime query work bounded as tables grow", async () => {
     const queries: [string, (string | number)[]][] = [
       [SQL.events, [size - 100, 100]],
       [SQL.keysAfter, ["t", String(size - 100).padStart(6, "0"), 100]],
+      [SQL.tableKeysFirst, ["t", 100]],
+      [SQL.tableKeysAfter, ["t", String(size - 100).padStart(6, "0"), 100]],
+      [SQL.tableKeysFirst, ["missing", 100]],
+      [SQL.tableKeysAfter, ["t", String(size).padStart(6, "0"), 1]],
+      [pointQuery(2, "d.id,d.sync_version"), ["missing", "x", "t", "absent"]],
       [
         pointQuery(2, "d.id,d.sync_version"),
         ["t", "000001", "t", String(size).padStart(6, "0")],

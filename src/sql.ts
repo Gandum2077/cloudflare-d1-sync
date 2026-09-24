@@ -10,6 +10,10 @@ export const SQL = {
   keysFirst: "SELECT tablename, id FROM data ORDER BY tablename, id LIMIT ?",
   keysAfter:
     "SELECT tablename, id FROM data WHERE (tablename,id) > (?,?) ORDER BY tablename,id LIMIT ?",
+  tableKeysFirst:
+    "SELECT tablename, id FROM data WHERE tablename = ? ORDER BY id LIMIT ?",
+  tableKeysAfter:
+    "SELECT tablename, id FROM data WHERE tablename = ? AND id > ? ORDER BY id LIMIT ?",
   deviceColumns:
     "id, name, platform, last_seq, last_request_seq, created_at, last_seen_at, disabled",
   change: `INSERT INTO changes(seq,tablename,id,operation,device_id,server_updated_at)

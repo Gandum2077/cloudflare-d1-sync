@@ -500,3 +500,322 @@ describe("additional contract boundaries", () => {
     expect(empty.next_cursor).toBeNull();
   });
 });
+
+describe("targeted reads", () => {
+  it("defaults to 100 records in an empty-name table and stops at its boundary", async () => {
+    await register();
+    await env.DB.batch(
+      Array.from({ length: 101 }, (_, i) =>
+        env.DB.prepare(SQL.save).bind(
+          "",
+          String(i).padStart(3, "0"),
+          "null",
+          1,
+          0,
+          0,
+          "a",
+          "a",
+        ),
+      ),
+    );
+    await upload([create("000")]);
+    const first = await data(
+      await call("/v1/table-download", { device_id: "a", tablename: "" }),
+    );
+    expect(first.data).toHaveLength(100);
+    expect(first.next_cursor.after).toEqual({ tablename: "", id: "099" });
+    const last = await data(
+      await call("/v1/table-download", {
+        device_id: "a",
+        tablename: "",
+        cursor: first.next_cursor,
+      }),
+    );
+    expect(last.data).toHaveLength(1);
+    expect(last.data[0]).toMatchObject({
+      tablename: "",
+      id: "100",
+      content: null,
+    });
+    expect(last.has_more).toBe(false);
+    expect(last.next_cursor).toBeNull();
+  });
+
+  it("distinguishes live null, tombstone and missing, with audit metadata and request order", async () => {
+    await register();
+    await register("b");
+    await upload([
+      create("live", null),
+      create("gone"),
+      { ...create("live", false), tablename: "other" },
+    ]);
+    await upload(
+      [
+        {
+          operation: "delete",
+          tablename: "t",
+          id: "gone",
+          base_sync_version: 1,
+        },
+      ],
+      1,
+      "b",
+    );
+    const keys = [
+      { tablename: "t", id: "missing" },
+      { tablename: "t", id: "gone" },
+      { tablename: "other", id: "live" },
+      { tablename: "t", id: "live" },
+      { tablename: "t", id: "live" },
+    ];
+    const result = await data(await call("/v1/read", { device_id: "a", keys }));
+    expect(result.results).toEqual([
+      { ...keys[0], found: false },
+      {
+        ...keys[1],
+        found: true,
+        deleted: true,
+        sync_version: 2,
+        server_updated_at: expect.any(Number),
+        updated_by_device_id: "b",
+      },
+      {
+        ...keys[2],
+        found: true,
+        deleted: false,
+        content: false,
+        sync_version: 1,
+        server_updated_at: expect.any(Number),
+        updated_by_device_id: "a",
+      },
+      ...[keys[3], keys[4]].map((key) => ({
+        ...key,
+        found: true,
+        deleted: false,
+        content: null,
+        sync_version: 1,
+        server_updated_at: expect.any(Number),
+        updated_by_device_id: "a",
+      })),
+    ]);
+    const stored = await env.DB.prepare(
+      "SELECT server_updated_at FROM data WHERE tablename='t' AND id='gone'",
+    ).first();
+    expect(result.results[1].server_updated_at).toBe(stored!.server_updated_at);
+    expect((await env.DB.prepare(SQL.device).bind("a").first())!.last_seq).toBe(
+      0,
+    );
+  });
+
+  it("handles 100 ordered lookups across groups and preserves raw JSON numbers and arbitrary keys", async () => {
+    await register();
+    const key = { tablename: "", id: "\u0000'/?中文" };
+    await env.DB.prepare(SQL.save)
+      .bind(
+        key.tablename,
+        key.id,
+        '{"large":9007199254740993,"exp":1e400}',
+        1,
+        0,
+        123,
+        "a",
+        "a",
+      )
+      .run();
+    const keys = Array.from({ length: 100 }, (_, i) =>
+      i % 2 ? key : { tablename: "", id: String(i) },
+    );
+    const response = await call("/v1/read", { device_id: "a", keys });
+    const text = await response.text();
+    expect(text).toContain('"large":9007199254740993,"exp":1e400');
+    const result = JSON.parse(text);
+    expect(result.results).toHaveLength(100);
+    result.results.forEach((row: Record<string, unknown>, i: number) => {
+      expect(row).toMatchObject({ ...keys[i], found: !!(i % 2) });
+    });
+    for (const badKeys of [
+      [],
+      null,
+      {},
+      [...keys, key],
+      [{ tablename: "t" }],
+      [{ tablename: "t", id: 1 }],
+      [{ ...key, extra: true }],
+    ]) {
+      expect(
+        (await call("/v1/read", { device_id: "a", keys: badKeys })).status,
+      ).toBe(400);
+    }
+  });
+
+  it("restricts table pages, includes tombstones and binds cursors to the requested table", async () => {
+    await register();
+    await upload([
+      create(""),
+      create("中'/?"),
+      { ...create(""), tablename: "u" },
+    ]);
+    await upload(
+      [
+        {
+          operation: "delete",
+          tablename: "t",
+          id: "中'/?",
+          base_sync_version: 1,
+        },
+      ],
+      2,
+    );
+    const first = await data(
+      await call("/v1/table-download", {
+        device_id: "a",
+        tablename: "t",
+        limit: 1,
+      }),
+    );
+    expect(first).toMatchObject({
+      start_seq: 4,
+      has_more: true,
+      next_cursor: { start_seq: 4, after: { tablename: "t", id: "" } },
+    });
+    expect(first.data).toHaveLength(1);
+    expect(first.data[0]).toMatchObject({
+      id: "",
+      updated_by_device_id: "a",
+      server_updated_at: expect.any(Number),
+    });
+    const last = await data(
+      await call("/v1/table-download", {
+        device_id: "a",
+        tablename: "t",
+        limit: 1,
+        cursor: first.next_cursor,
+      }),
+    );
+    expect(last).toMatchObject({
+      start_seq: 4,
+      has_more: false,
+      next_cursor: null,
+    });
+    expect(last.data).toHaveLength(1);
+    expect(last.data[0]).toMatchObject({
+      id: "中'/?",
+      deleted: true,
+      sync_version: 2,
+    });
+    expect(last.data[0]).not.toHaveProperty("content");
+    const wrong = await call("/v1/table-download", {
+      device_id: "a",
+      tablename: "u",
+      cursor: first.next_cursor,
+    });
+    expect(wrong.status).toBe(400);
+    expect((await data(wrong)).error.code).toBe("INVALID_CURSOR");
+    for (const tablename of ["", "absent"]) {
+      expect(
+        await data(
+          await call("/v1/table-download", { device_id: "a", tablename }),
+        ),
+      ).toEqual({ data: [], start_seq: 4, has_more: false, next_cursor: null });
+    }
+    expect((await env.DB.prepare(SQL.device).bind("a").first())!.last_seq).toBe(
+      0,
+    );
+  });
+
+  it("recovers concurrent writes behind a table cursor and expires old cursors", async () => {
+    await register();
+    await upload([create("b"), create("z")]);
+    const first = await data(
+      await call("/v1/table-download", {
+        device_id: "a",
+        tablename: "t",
+        limit: 1,
+      }),
+    );
+    await upload([create("a")], 2);
+    const last = await data(
+      await call("/v1/table-download", {
+        device_id: "a",
+        tablename: "t",
+        cursor: first.next_cursor,
+      }),
+    );
+    expect(last.start_seq).toBe(2);
+    expect(last.data.map((row: { id: string }) => row.id)).toEqual(["z"]);
+    const catchup = await data(
+      await call("/v1/sync", {
+        device_id: "a",
+        seq: first.start_seq,
+        include_self: true,
+      }),
+    );
+    expect(catchup.changes.map((row: { id: string }) => row.id)).toEqual(["a"]);
+    await upload([create("c")], 3);
+    await env.DB.prepare("DELETE FROM changes WHERE seq < 4").run();
+    expect(
+      (
+        await call("/v1/table-download", {
+          device_id: "a",
+          tablename: "t",
+          cursor: first.next_cursor,
+        })
+      ).status,
+    ).toBe(410);
+    // Point reads are independent of the retained change window.
+    expect(
+      (
+        await data(
+          await call("/v1/read", {
+            device_id: "a",
+            keys: [{ tablename: "t", id: "b" }],
+          }),
+        )
+      ).results[0].found,
+    ).toBe(true);
+  });
+
+  it("checks authentication, device access, methods and page parameters", async () => {
+    await register();
+    for (const [path, body] of [
+      ["/v1/read", { keys: [{ tablename: "t", id: "a" }] }],
+      ["/v1/table-download", { tablename: "t" }],
+    ] as const) {
+      expect((await call(path)).status).toBe(405);
+      expect(
+        (
+          await call(path, { ...body, device_id: "a" }, "POST", {
+            MASTER_KEY: "b".repeat(64),
+          })
+        ).status,
+      ).toBe(401);
+      expect((await call(path, { ...body, device_id: "missing" })).status).toBe(
+        404,
+      );
+      await call("/v1/devices/a", { disabled: true }, "PATCH");
+      expect((await call(path, { ...body, device_id: "a" })).status).toBe(403);
+      await call("/v1/devices/a", { disabled: false }, "PATCH");
+    }
+    for (const extra of [
+      { limit: 101 },
+      { limit: 0 },
+      { tablename: null },
+      { tablename: 1 },
+      { cursor: {} },
+      { cursor: { start_seq: 1, after: { tablename: "t", id: "" } } },
+    ]) {
+      expect(
+        (
+          await call("/v1/table-download", {
+            device_id: "a",
+            tablename: "t",
+            ...extra,
+          })
+        ).status,
+      ).toBe(400);
+    }
+    expect((await call("/v1/table-download", { device_id: "a" })).status).toBe(
+      400,
+    );
+  });
+});

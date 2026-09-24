@@ -21,7 +21,7 @@ Accept: application/json
 
 缺失、格式错误或不匹配的密钥统一返回 `401 UNAUTHORIZED`。更换 Worker Secret 后所有设备须使用新密钥。device_id 只是设备标识，不是独立凭据；持有主密钥可以管理全部设备，包括重新启用设备。
 
-增量和完整下载响应采用流式输出；客户端须接收并解析完整 JSON 后才应用本页。若响应中断，即使已收到 HTTP 200，也不能推进游标，应重试原页。
+增量、完整下载、单表下载和批量读取响应采用流式输出；客户端须接收并解析完整 JSON 后才应用本页。若响应中断，即使已收到 HTTP 200，也不能推进游标，应重试原页。
 
 JSON 响应设置 `Content-Type: application/json; charset=utf-8` 和 `Cache-Control: no-store`。平台在请求到达 Worker 前返回的错误可能不遵循本文 JSON 格式。
 
@@ -59,6 +59,8 @@ JSON 响应设置 `Content-Type: application/json; charset=utf-8` 和 `Cache-Con
 | POST | `/v1/write` | 最多 10 条批量写入 |
 | POST | `/v1/sync` | 增量下载、确认正式游标或恢复补拉 |
 | POST | `/v1/full-download` | 分页完整下载 |
+| POST | `/v1/read` | 按 tablename + id 批量读取当前状态 |
+| POST | `/v1/table-download` | 指定 tablename 分页下载 |
 
 没有 `/v1/full-sync`、upsert、任意 SQL、全量一次性导出或业务字段查询接口。
 
@@ -89,7 +91,7 @@ JSON 响应设置 `Content-Type: application/json; charset=utf-8` 和 `Cache-Con
 }
 ```
 
-以上字段为完整 Record 格式。存活记录必须有 content，即使值为 null；删除记录省略 content。不返回历史 content、事件 seq 或数据库内部字段。服务端仍维护创建者、更新者和更新时间，用于版本处理与自身过滤。
+以上为 sync/full-download 使用的基础 Record 格式。read/table-download 还返回 `server_updated_at`（云端 Unix 毫秒时间戳）和 `updated_by_device_id`（最后修改设备，字符串或 null），以下称 DetailedRecord。存活记录必须有 content，即使值为 null；删除记录省略 content。不返回历史 content、事件 seq 或数据库内部字段。服务端仍维护创建者、更新者和更新时间，用于版本处理与自身过滤。
 
 ### 2.2 设备 Device
 
@@ -108,7 +110,7 @@ JSON 响应设置 `Content-Type: application/json; charset=utf-8` 和 `Cache-Con
 
 name/platform 为字符串或 null；last_seq 是设备已确认应用的位置，last_request_seq 是最后完成的整批写请求编号。两者不相关。不得返回 last_request_hash、last_request_result 或主密钥。
 
-created_at 注册后不变。设备成功发起 write/sync/full-download 时更新 last_seen_at；它仅作最近活动参考。资料管理和列表查询不代表目标设备上线，不更新已有设备的 last_seen_at。注册时两时间均取当前服务端时间。
+created_at 注册后不变。设备成功发起 write/sync/full-download/read/table-download 时更新 last_seen_at；它仅作最近活动参考。资料管理和列表查询不代表目标设备上线，不更新已有设备的 last_seen_at。注册时两时间均取当前服务端时间。
 
 ### 2.3 接口级错误
 
@@ -221,7 +223,7 @@ GET /v1/devices?limit=100&after_id=iphone-01
 
 响应 `200 OK`，结构为 `{"device": Device}`，字段与 4.1 相同。目标不存在返回 `404 DEVICE_NOT_FOUND`。重复设置同一状态成功，不增加任何 sync_version、seq 或 request_seq。
 
-禁用设备调用 write/sync/full-download 返回 `403 DEVICE_DISABLED`，包括写请求重放。重新启用保留原请求编号、结果与游标；密钥轮换不重置这些状态。禁用不能撤销主密钥。
+禁用设备调用 write/sync/full-download/read/table-download 返回 `403 DEVICE_DISABLED`，包括写请求重放。重新启用保留原请求编号、结果与游标；密钥轮换不重置这些状态。禁用不能撤销主密钥。
 
 ## 5. 批量写入
 
@@ -395,7 +397,9 @@ include_self=true 用于暂存区恢复，不更新 devices.last_seq。恢复切
 
 ### 6.4 冲突后的拉取
 
-失败项只含版本和删除状态。客户端保留本地待上传意图，从正式游标同步云端状态以解决冲突。需要包含自身版本时可使用 include_self=true，但自行在本地成功应用后再通过普通请求确认。若目标已不在保留窗口内，按 FULL_SYNC_REQUIRED 进行完整下载；不能绕过索引限制扫描历史查找目标。
+失败项只含版本和删除状态。客户端可用 `/v1/read` 点查冲突目标的当前内容、版本、删除状态及修改信息，不依赖 changes 保留窗口；保留本地待上传意图，按版本决定如何解决冲突。点查不会确认或替代增量同步，也不能根据响应到达顺序覆盖本地较新版本。
+
+也可从正式游标同步云端状态；需要包含自身版本时使用 include_self=true，成功应用后再通过普通请求确认。收到 FULL_SYNC_REQUIRED 时仍需完整下载。
 
 ## 7. 完整下载
 
@@ -546,7 +550,64 @@ data 为 Record 数组，按 `(tablename, id)` 的 BINARY 主键顺序排列，�
 
 设备请求编号、增量游标、复合主键下载游标是三种不同状态，不得互相替代。服务端数据已删除时，客户端必须应用 tombstone，不能用旧 update 自动复活。
 
-## 10. 文档范围与实施验证
+## 10. 批量读取当前记录
+
+### POST /v1/read
+
+必填 `device_id`（已注册且启用）及 `keys`（1～100 个 `{tablename, id}` 对象）。支持跨表、空字符串及任意特殊字符；重复键允许，按原位置重复返回。请求禁止其他字段。
+
+```json
+{"device_id":"iphone-01","keys":[{"tablename":"archives","id":"A"},{"tablename":"archives","id":"B"},{"tablename":"archives","id":"C"}]}
+```
+
+响应 `200 OK`，results 与 keys 长度、顺序一致：
+
+```json
+{
+  "results": [
+    {"tablename":"archives","id":"A","found":true,"content":null,"sync_version":3,"deleted":false,"server_updated_at":1789516800000,"updated_by_device_id":"mac-01"},
+    {"tablename":"archives","id":"B","found":true,"sync_version":4,"deleted":true,"server_updated_at":1789516860000,"updated_by_device_id":"iphone-01"},
+    {"tablename":"archives","id":"C","found":false}
+  ]
+}
+```
+
+- `found=true, deleted=false`：存活，content 必定存在，包括 JSON null。
+- `found=true, deleted=true`：已删除，保留版本及修改信息，省略 content。
+- `found=false`：从未存在于当前 data 中，只返回主键及 found；省略 content、版本、deleted 和修改信息。不能将其当成某个版本的 tombstone。
+
+包括自身修改。每十个键一组主键点查，不建立跨记录快照；重复键跨组时也可能读到不同版本。读取不依赖日志、不更新 last_seq、不消耗 request_seq，只更新 last_seen_at。流式错误规则与下载一致：完整接收后先检查顶层 error，再使用结果。
+
+## 11. 单表分页下载
+
+### POST /v1/table-download
+
+必填 `device_id`（已注册且启用）及 `tablename`（任意字符串，包括空字符串）。可选 `limit` 默认/最大 100，最小 1；`cursor` 首次省略或 null，后续原样传入 next_cursor。
+
+```json
+{"device_id":"iphone-01","tablename":"archives","limit":100}
+```
+
+```json
+{
+  "data": [
+    {"tablename":"archives","id":"A","content":{"title":"示例"},"sync_version":3,"deleted":false,"server_updated_at":1789516800000,"updated_by_device_id":"mac-01"}
+  ],
+  "start_seq": 1200,
+  "next_cursor": {"start_seq":1200,"after":{"tablename":"archives","id":"A"}},
+  "has_more": true
+}
+```
+
+data 为 DetailedRecord 数组，只包含请求表，按 id 的 BINARY 主键顺序分页，包含 tombstone 和自身修改。后续请求仍须携带相同 tablename；cursor.after.tablename 不一致返回 `400 INVALID_CURSOR`。末页 next_cursor=null、has_more=false；没有记录的表返回空末页，不报表不存在。合法游标超过最后一个 id 也返回空末页。
+
+查询用复合主键的 tablename 前缀和 id 范围定位；不扫描其他表，不用 OFFSET，不返回总数。start_seq 在首次读取键页前取得，后续保持不变。游标未来值返回 INVALID_CURSOR，日志过期返回 `410 FULL_SYNC_REQUIRED`，须重新开始下载。没有固定时点快照。
+
+首次启用同步或重下载时，在暂存区逐页保存目标表；暂停本设备上传并保留待上传意图。下载结束后，从 start_seq 调用 `/v1/sync`，设置 include_self=true，逐页按返回的 next_seq 前进，将目标表的变化按较大 sync_version 应用到暂存区，包括自身修改以及落在已下载键范围内的新增记录。补拉仍扫描全局 changes，客户端在当前页中过滤目标表，不能因为本页无目标记录而停止。日志过期则重下目标表。
+
+追平后事务性替换目标表云端基线并保留本地待上传操作，再恢复上传。单表下载和恢复补拉不会推进 devices.last_seq；不能将单表补拉游标当成其他已启用表的正式游标。原有普通增量同步继续负责其他表及正式游标确认；全局日志已过期时，其他启用表也必须完成恢复后才能确认新位置。
+
+## 12. 文档范围与实施验证
 
 本文确定公开 HTTP 契约。实现验收覆盖所有请求示例、字段边界、混合结果、幂等并发、GC 竞态与恢复分页，并在 D1 上验证索引查询的实际读取行数。SQL 带 LIMIT 不构成禁止全表扫描要求的充分证明。
 

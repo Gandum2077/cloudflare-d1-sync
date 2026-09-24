@@ -20,9 +20,10 @@ function validCursor(seq: number, bounds: Bounds) {
 export function records(
   db: D1DatabaseSession,
   keys: Key[],
-  field: "changes" | "data",
+  field: "changes" | "data" | "results",
   tail: Record<string, unknown>,
   exclude?: string,
+  details = false,
 ): Response {
   const encoder = new TextEncoder();
   let offset = 0,
@@ -39,7 +40,9 @@ export function records(
         while (true) {
           if (offset >= keys.length) {
             controller.enqueue(
-              encoder.encode(`],${JSON.stringify(tail).slice(1)}`),
+              encoder.encode(
+                `]${Object.keys(tail).length ? "," + JSON.stringify(tail).slice(1) : "}"}`,
+              ),
             );
             controller.close();
             return;
@@ -48,7 +51,7 @@ export function records(
           offset += group.length;
           const sql = pointQuery(
             group.length,
-            "d.tablename,d.id,d.content,d.sync_version,d.deleted,d.updated_by_device_id",
+            "d.tablename,d.id,d.content,d.sync_version,d.deleted,d.updated_by_device_id,d.server_updated_at",
           );
           const rows = await db
             .prepare(sql)
@@ -60,12 +63,26 @@ export function records(
                 sync_version: number;
                 deleted: number;
                 updated_by_device_id: string | null;
+                server_updated_at: number;
               }
             >();
-          if (rows.results.length !== group.length)
+          if (field !== "results" && rows.results.length !== group.length)
             throw new Error("Missing authoritative record");
           let groupEmitted = false;
-          for (const row of rows.results.sort((a, b) => a.idx - b.idx)) {
+          const byIndex = new Map(rows.results.map((row) => [row.idx, row]));
+          for (const [index, key] of group.entries()) {
+            const row = byIndex.get(index);
+            if (!row) {
+              controller.enqueue(
+                encoder.encode(
+                  (emitted ? "," : "") +
+                    JSON.stringify({ ...key, found: false }),
+                ),
+              );
+              emitted = true;
+              groupEmitted = true;
+              continue;
+            }
             if (exclude !== undefined && row.updated_by_device_id === exclude)
               continue;
             const metadata = JSON.stringify({
@@ -73,6 +90,13 @@ export function records(
               id: row.id,
               sync_version: row.sync_version,
               deleted: !!row.deleted,
+              ...(field === "results" ? { found: true } : {}),
+              ...(details
+                ? {
+                    server_updated_at: row.server_updated_at,
+                    updated_by_device_id: row.updated_by_device_id,
+                  }
+                : {}),
             });
             const value = row.deleted
               ? metadata
@@ -107,6 +131,36 @@ export function records(
       "X-Content-Type-Options": "nosniff",
     },
   });
+}
+export async function read(
+  db: D1DatabaseSession,
+  body: Record<string, unknown>,
+) {
+  object(body, ["device_id", "keys"]);
+  const id = string(body.device_id, true);
+  if (
+    !Array.isArray(body.keys) ||
+    body.keys.length < 1 ||
+    body.keys.length > 100
+  )
+    fail();
+  const keys = body.keys.map((value) => {
+    const key = object(value, ["tablename", "id"]);
+    return { tablename: string(key.tablename), id: string(key.id) };
+  });
+  enabled((await db.prepare(SQL.device).bind(id).first<Device>()) ?? undefined);
+  await touchDevice(db, id);
+  return records(db, keys, "results", {}, undefined, true);
+}
+
+async function touchDevice(db: D1DatabaseSession, id: string) {
+  const updated = await db
+    .prepare(
+      "UPDATE devices SET last_seen_at=? WHERE id=? AND disabled=0 RETURNING id",
+    )
+    .bind(Date.now(), id)
+    .first();
+  if (!updated) fail("DEVICE_DISABLED", 403);
 }
 export async function sync(
   db: D1DatabaseSession,
@@ -154,7 +208,26 @@ export async function fullDownload(
   db: D1DatabaseSession,
   body: Record<string, unknown>,
 ) {
-  object(body, ["device_id", "limit", "cursor"]);
+  return download(db, body, false);
+}
+export async function tableDownload(
+  db: D1DatabaseSession,
+  body: Record<string, unknown>,
+) {
+  return download(db, body, true);
+}
+async function download(
+  db: D1DatabaseSession,
+  body: Record<string, unknown>,
+  scoped: boolean,
+) {
+  object(
+    body,
+    scoped
+      ? ["device_id", "limit", "cursor", "tablename"]
+      : ["device_id", "limit", "cursor"],
+  );
+  const table = scoped ? string(body.tablename) : undefined;
   const id = string(body.device_id, true),
     size = limit(body.limit);
   let after: Key | undefined, start: number | undefined;
@@ -164,14 +237,20 @@ export async function fullDownload(
       start = integer(cursor.start_seq, 0, "INVALID_CURSOR");
       const key = object(cursor.after, ["tablename", "id"]);
       after = { tablename: string(key.tablename), id: string(key.id) };
+      if (scoped && after.tablename !== table) fail("INVALID_CURSOR");
     } catch (error) {
       if (error instanceof ApiError) fail("INVALID_CURSOR");
       throw error;
     }
   }
-  const page = after
-    ? db.prepare(SQL.keysAfter).bind(after.tablename, after.id, size)
-    : db.prepare(SQL.keysFirst).bind(size);
+  const page =
+    table !== undefined
+      ? after
+        ? db.prepare(SQL.tableKeysAfter).bind(table, after.id, size)
+        : db.prepare(SQL.tableKeysFirst).bind(table, size)
+      : after
+        ? db.prepare(SQL.keysAfter).bind(after.tablename, after.id, size)
+        : db.prepare(SQL.keysFirst).bind(size);
   const result = await db.batch([
     db.prepare(SQL.device).bind(id),
     db.prepare(SQL.bounds),
@@ -184,21 +263,23 @@ export async function fullDownload(
   const keys = result[2].results as Key[];
   const last = keys.at(-1);
   const more = last
-    ? !!(await db
-        .prepare(SQL.keysAfter)
-        .bind(last.tablename, last.id, 1)
-        .first())
+    ? !!(await (
+        table !== undefined
+          ? db.prepare(SQL.tableKeysAfter).bind(table, last.id, 1)
+          : db.prepare(SQL.keysAfter).bind(last.tablename, last.id, 1)
+      ).first())
     : false;
-  const updated = await db
-    .prepare(
-      "UPDATE devices SET last_seen_at=? WHERE id=? AND disabled=0 RETURNING id",
-    )
-    .bind(Date.now(), id)
-    .first();
-  if (!updated) fail("DEVICE_DISABLED", 403);
-  return records(db, keys, "data", {
-    start_seq: startSeq,
-    next_cursor: more ? { start_seq: startSeq, after: last } : null,
-    has_more: more,
-  });
+  await touchDevice(db, id);
+  return records(
+    db,
+    keys,
+    "data",
+    {
+      start_seq: startSeq,
+      next_cursor: more ? { start_seq: startSeq, after: last } : null,
+      has_more: more,
+    },
+    undefined,
+    scoped,
+  );
 }

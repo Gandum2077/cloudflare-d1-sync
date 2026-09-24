@@ -1,7 +1,7 @@
 import { ApiError, authenticate, databaseError, fail, json } from "./http";
 import { readBody } from "./body";
 import { putDevice, patchDevice, listDevices } from "./devices";
-import { fullDownload, sync } from "./read";
+import { fullDownload, read, sync, tableDownload } from "./read";
 import { write } from "./write";
 import { cleanup } from "./cleanup";
 
@@ -25,9 +25,13 @@ export async function handle(request: Request, env: Env): Promise<Response> {
         ? ["GET"]
         : url.pathname === "/v1/health"
           ? ["GET"]
-          : ["/v1/write", "/v1/sync", "/v1/full-download"].includes(
-                url.pathname,
-              )
+          : [
+                "/v1/write",
+                "/v1/sync",
+                "/v1/full-download",
+                "/v1/read",
+                "/v1/table-download",
+              ].includes(url.pathname)
             ? ["POST"]
             : null;
     if (!methods) fail("NOT_FOUND", 404);
@@ -57,6 +61,9 @@ export async function handle(request: Request, env: Env): Promise<Response> {
     if (url.pathname === "/v1/write")
       return json(await write(db, body, hash, contents));
     if (url.pathname === "/v1/sync") return await sync(db, body);
+    if (url.pathname === "/v1/read") return await read(db, body);
+    if (url.pathname === "/v1/table-download")
+      return await tableDownload(db, body);
     return await fullDownload(db, body);
   } catch (error) {
     const failure = error instanceof ApiError ? error : databaseError(error);

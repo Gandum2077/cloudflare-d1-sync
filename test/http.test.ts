@@ -79,51 +79,66 @@ it("keeps row-size errors separate from exhausted database storage", () => {
     databaseError(new Error("string or blob too big: SQLITE_TOOBIG")).code,
   ).toBe("PAYLOAD_TOO_LARGE");
 });
-it("reports a late streamed quota failure without returning a commit cursor", async () => {
-  const keys = Array.from({ length: 11 }, (_, i) => ({
-    tablename: "t",
-    id: String(i),
-  }));
-  await env.DB.batch(
-    keys.map((k) =>
-      env.DB.prepare(SQL.save).bind(k.tablename, k.id, "{}", 1, 0, 0, "a", "a"),
-    ),
-  );
-  let pages = 0;
-  function wrap(statement: D1PreparedStatement): D1PreparedStatement {
-    return new Proxy(statement, {
+it.each(["changes", "data", "results"] as const)(
+  "reports a late %s streamed quota failure without returning a commit cursor",
+  async (field) => {
+    const keys = Array.from({ length: 11 }, (_, i) => ({
+      tablename: "t",
+      id: String(i),
+    }));
+    await env.DB.batch(
+      keys.map((k) =>
+        env.DB.prepare(SQL.save).bind(
+          k.tablename,
+          k.id,
+          "{}",
+          1,
+          0,
+          0,
+          "a",
+          "a",
+        ),
+      ),
+    );
+    let pages = 0;
+    function wrap(statement: D1PreparedStatement): D1PreparedStatement {
+      return new Proxy(statement, {
+        get(target, key) {
+          if (key === "bind")
+            return (...args: unknown[]) => wrap(target.bind(...args));
+          if (key === "all")
+            return async () => {
+              if (++pages === 2) throw new Error(quotaCases[0][0]);
+              return target.all();
+            };
+          return Reflect.get(target, key);
+        },
+      });
+    }
+    const session = env.DB.withSession("first-primary");
+    const db = new Proxy(session, {
       get(target, key) {
-        if (key === "bind")
-          return (...args: unknown[]) => wrap(target.bind(...args));
-        if (key === "all")
-          return async () => {
-            if (++pages === 2) throw new Error(quotaCases[0][0]);
-            return target.all();
-          };
+        if (key === "prepare")
+          return (sql: string) => wrap(target.prepare(sql));
         return Reflect.get(target, key);
       },
     });
-  }
-  const session = env.DB.withSession("first-primary");
-  const db = new Proxy(session, {
-    get(target, key) {
-      if (key === "prepare") return (sql: string) => wrap(target.prepare(sql));
-      return Reflect.get(target, key);
-    },
-  });
-  const response = records(db, keys, "changes", {
-    next_seq: 11,
-    has_more: false,
-  });
-  expect(response.status).toBe(200);
-  const result = await response.json<{
-    changes: unknown[];
-    error: { code: string };
-    next_seq?: number;
-    has_more?: boolean;
-  }>();
-  expect(result.changes).toHaveLength(10);
-  expect(result.error.code).toBe("D1_READ_QUOTA_EXCEEDED");
-  expect(result.next_seq).toBeUndefined();
-  expect(result.has_more).toBeUndefined();
-});
+    const response = records(db, keys, field, {
+      next_seq: 11,
+      has_more: false,
+    });
+    expect(response.status).toBe(200);
+    const result = await response.json<{
+      changes?: unknown[];
+      data?: unknown[];
+      results?: unknown[];
+      error: { code: string };
+      next_seq?: number;
+      has_more?: boolean;
+    }>();
+    expect(result[field]).toHaveLength(10);
+    expect(result.error.code).toBe("D1_READ_QUOTA_EXCEEDED");
+    expect(result.next_seq).toBeUndefined();
+    expect(result.has_more).toBeUndefined();
+  },
+);
